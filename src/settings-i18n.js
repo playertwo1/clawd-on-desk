@@ -9801,7 +9801,7 @@
   ];
 
   const CONTRIBUTORS = [
-    "playertwo1", "RomanticTinkerer", "PixelCookie-zyf", "yujiachen-y", "AooooooZzzz", "purefkh", "Tobeabellwether", "Jasonhonghh", "crashchen",
+    "PixelCookie-zyf", "yujiachen-y", "AooooooZzzz", "purefkh", "Tobeabellwether", "Jasonhonghh", "crashchen",
     "hongbigtou", "InTimmyDate", "NeizhiTouhu", "xu3stones-cmd", "androidZzT", "Ye-0413", "WanfengzzZ",
     "TaoXieSZ", "ssly", "stickycandy", "Rladmsrl", "YOIMIYA66", "Kevin7Qi", "sefuzhou770801-hub",
     "Tonic-Jin", "seoki180", "sophie-haynes", "PeterShanxin", "CHIANGANGSTER", "JaeHyeon-KAIST", "hhhzxyhhh",
@@ -9821,7 +9821,7 @@
     "hanzhe-one", "52mzd", "gzx19990101", "ypjn", "jin-codes", "LetitiaChan", "sanzanazaman",
     "zero-or-one", "integrasoft-c", "yunho09", "tianxingjian2406", "Aminorsh", "daijx-ai", "XYZliang",
     "sunfleeting-debug", "du-xinyi", "AllanOliveiraM", "RyanChenJJH", "alwinecor",
-    "rexxless", "commiyou", "richard-kramer",
+    "rexxless", "commiyou", "richard-kramer", "playertwo1", "RomanticTinkerer",
   ];
 
   root.ClawdSettingsI18n = {
