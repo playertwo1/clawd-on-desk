@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const { execFileSync } = require("node:child_process");
 
 const IDENTITY_OVERRIDES = new Map(Object.entries({
+  "fael@live.de": "playertwo1",
   "rullerzhou@gmail.com": null,
   "228746293+rullerzhou-afk@users.noreply.github.com": null,
   "cursoragent@cursor.com": null,

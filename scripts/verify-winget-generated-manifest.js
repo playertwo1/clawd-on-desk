@@ -13,8 +13,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const yaml = require("js-yaml");
 
-const PACKAGE_IDENTIFIER = "rullerzhou-afk.clawd-on-desk";
-const PUBLISHER_PATH = ["r", "rullerzhou-afk", "clawd-on-desk"];
+const PACKAGE_IDENTIFIER = "playertwo1.clawd-on-desk";
+const PUBLISHER_PATH = ["p", "playertwo1", "clawd-on-desk"];
 const PRODUCT_CODE = "3e932233-a8b2-5530-b285-e0ceb08488f2";
 const MANIFEST_VERSION = "1.12.0";
 const LICENSE = "AGPL-3.0-only";
@@ -244,9 +244,9 @@ function normalizeLocale(document, releaseTag) {
   if (!document) return;
   document.value.License = LICENSE;
   document.value.LicenseUrl =
-    `https://github.com/rullerzhou-afk/clawd-on-desk/blob/${releaseTag}/LICENSE`;
+    `https://github.com/playertwo1/clawd-on-desk/blob/${releaseTag}/LICENSE`;
   document.value.ReleaseNotesUrl =
-    `https://github.com/rullerzhou-afk/clawd-on-desk/releases/tag/${releaseTag}`;
+    `https://github.com/playertwo1/clawd-on-desk/releases/tag/${releaseTag}`;
 }
 
 function validateArchitectureContract(contract, releaseTag, version, errors) {
@@ -291,7 +291,7 @@ function validateArchitectureContract(contract, releaseTag, version, errors) {
       errors.push(`architecture contract ${architecture} filename does not identify its architecture.`);
     }
     const expectedUrl =
-      `https://github.com/rullerzhou-afk/clawd-on-desk/releases/download/` +
+      `https://github.com/playertwo1/clawd-on-desk/releases/download/` +
       `${releaseTag}/${installer.filename}`;
     pushEqual(errors, installer.url, expectedUrl, `architecture contract ${architecture} URL`);
     if (typeof installer.digest !== "string" ||
@@ -400,15 +400,15 @@ function validateInstallerManifest(document, contractInstallers, version, errors
 
 function validateLocales(documents, releaseTag, errors) {
   const expectedLicenseUrl =
-    `https://github.com/rullerzhou-afk/clawd-on-desk/blob/${releaseTag}/LICENSE`;
+    `https://github.com/playertwo1/clawd-on-desk/blob/${releaseTag}/LICENSE`;
   const expectedReleaseNotesUrl =
-    `https://github.com/rullerzhou-afk/clawd-on-desk/releases/tag/${releaseTag}`;
+    `https://github.com/playertwo1/clawd-on-desk/releases/tag/${releaseTag}`;
 
   const defaultLocale = documents.defaultLocale?.value;
   if (defaultLocale) {
     validateExactKeys(errors, defaultLocale, ALLOWED_KEYS.defaultLocale, "defaultLocale");
     pushEqual(errors, defaultLocale.PackageLocale, "en-US", "defaultLocale.PackageLocale");
-    pushEqual(errors, defaultLocale.Publisher, "rullerzhou-afk", "defaultLocale.Publisher");
+    pushEqual(errors, defaultLocale.Publisher, "playertwo1", "defaultLocale.Publisher");
     pushEqual(errors, defaultLocale.PackageName, "Clawd on Desk", "defaultLocale.PackageName");
     pushEqual(errors, defaultLocale.License, LICENSE, "defaultLocale.License");
     pushEqual(errors, defaultLocale.LicenseUrl, expectedLicenseUrl, "defaultLocale.LicenseUrl");

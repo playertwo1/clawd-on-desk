@@ -15,12 +15,12 @@ const {
 } = require("../scripts/submit-winget-manifest.js");
 
 const INPUT = {
-  forkOwner: "rullerzhou-afk",
+  forkOwner: "playertwo1",
   expectedDigests: "/tmp/winget-digests.json",
   releaseTag: "v1.2.3",
   runAttempt: "1",
   runId: "123456",
-  sourceRepository: "rullerzhou-afk/clawd-on-desk",
+  sourceRepository: "playertwo1/clawd-on-desk",
 };
 
 function fixture() {
@@ -42,7 +42,7 @@ function fixture() {
   );
   fs.writeFileSync(expectedDigests, JSON.stringify({
     schemaVersion: 1,
-    packageIdentifier: "rullerzhou-afk.clawd-on-desk",
+    packageIdentifier: "playertwo1.clawd-on-desk",
     version: plan.version,
     releaseTag: plan.releaseTag,
     manifestDirectory: plan.manifestRelativePath,
@@ -108,7 +108,7 @@ function fakeExecutor(
         stderr: "",
       };
     }
-    if (command === "gh" && args[0] === "api" && args[1] === "repos/rullerzhou-afk/winget-pkgs") {
+    if (command === "gh" && args[0] === "api" && args[1] === "repos/playertwo1/winget-pkgs") {
       return {
         status: 0,
         stdout: JSON.stringify({
@@ -121,7 +121,7 @@ function fakeExecutor(
     if (command === "gh" && args[0] === "api" && args[1] === "user") {
       return {
         status: 0,
-        stdout: JSON.stringify({ id: 228746293, login: "rullerzhou-afk" }),
+        stdout: JSON.stringify({ id: 21163889, login: "playertwo1" }),
         stderr: "",
       };
     }
@@ -160,7 +160,7 @@ describe("WinGet submit planner", () => {
     assert.equal(plan.branch, "automation/clawd-1.2.3");
     assert.equal(
       plan.manifestRelativePath,
-      "manifests/r/rullerzhou-afk/clawd-on-desk/1.2.3",
+      "manifests/p/playertwo1/clawd-on-desk/1.2.3",
     );
     assert.equal(expectedManifestPaths(plan).length, 4);
   });

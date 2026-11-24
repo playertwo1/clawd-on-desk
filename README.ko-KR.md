@@ -7,7 +7,7 @@
   <p><b>AI 코딩 에이전트의 상태에 실시간으로 반응하는 픽셀 데스크톱 펫.</b></p>
   <p><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · 한국어 · <a href="README.ja-JP.md">日本語</a> · <a href="README.es.md">Español</a></p>
   <a href="https://github.com/rullerzhou-afk/clawd-on-desk/stargazers"><img src="https://img.shields.io/github/stars/rullerzhou-afk/clawd-on-desk?style=flat-square" alt="Stars"></a>
-  <a href="https://github.com/rullerzhou-afk/clawd-on-desk/releases"><img src="https://img.shields.io/github/v/release/rullerzhou-afk/clawd-on-desk?label=version&style=flat-square" alt="Version"></a>
+  <a href="https://github.com/playertwo1/clawd-on-desk/releases"><img src="https://img.shields.io/github/v/release/playertwo1/clawd-on-desk?label=version&style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
   <a href="https://github.com/hesreallyhim/awesome-claude-code"><img src="https://awesome.re/mentioned-badge-flat.svg" alt="Mentioned in Awesome Claude Code"></a>
@@ -34,7 +34,7 @@
 
 ## 빠른 시작
 
-**[GitHub Releases](https://github.com/rullerzhou-afk/clawd-on-desk/releases/latest)**에서 최신 설치 파일을 받으세요:
+**[GitHub Releases](https://github.com/playertwo1/clawd-on-desk/releases/latest)**에서 최신 설치 파일을 받으세요:
 
 | 플랫폼 | 다운로드 |
 |---|---|
@@ -52,7 +52,7 @@ Clawd를 실행하면 바로 반응하기 시작합니다. 첫 실행 때 Claude
 
 ```bash
 # 저장소 복제
-git clone https://github.com/rullerzhou-afk/clawd-on-desk.git
+git clone https://github.com/playertwo1/clawd-on-desk.git
 cd clawd-on-desk
 
 # 의존성 설치

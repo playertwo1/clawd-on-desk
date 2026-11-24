@@ -7,7 +7,7 @@
   <p><b>一只像素桌宠，实时感知你的 AI 编程助手在做什么。</b></p>
   <p><a href="README.md">English</a> · 简体中文 · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ko-KR.md">한국어</a> · <a href="README.ja-JP.md">日本語</a> · <a href="README.es.md">Español</a></p>
   <a href="https://github.com/rullerzhou-afk/clawd-on-desk/stargazers"><img src="https://img.shields.io/github/stars/rullerzhou-afk/clawd-on-desk?style=flat-square" alt="Stars"></a>
-  <a href="https://github.com/rullerzhou-afk/clawd-on-desk/releases"><img src="https://img.shields.io/github/v/release/rullerzhou-afk/clawd-on-desk?label=version&style=flat-square" alt="Version"></a>
+  <a href="https://github.com/playertwo1/clawd-on-desk/releases"><img src="https://img.shields.io/github/v/release/playertwo1/clawd-on-desk?label=version&style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
   <a href="https://github.com/hesreallyhim/awesome-claude-code"><img src="https://awesome.re/mentioned-badge-flat.svg" alt="Mentioned in Awesome Claude Code"></a>
@@ -34,7 +34,7 @@
 
 ## 快速开始
 
-从 **[GitHub Releases](https://github.com/rullerzhou-afk/clawd-on-desk/releases/latest)** 下载最新安装包：
+从 **[GitHub Releases](https://github.com/playertwo1/clawd-on-desk/releases/latest)** 下载最新安装包：
 
 | 平台 | 下载 |
 |---|---|
@@ -52,7 +52,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/rullerzhou-afk/clawd-on-desk.git
+git clone https://github.com/playertwo1/clawd-on-desk.git
 cd clawd-on-desk
 
 # 安装依赖

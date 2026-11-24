@@ -82,6 +82,20 @@ Download and smoke-test the draft release assets before publishing the draft.
 If the draft is wrong, fix the issue before publishing; do not publish a known
 bad draft release.
 
+### v1.7.1 Draft Smoke Checklist
+
+Record platform, architecture, package hash and result for each check. Use NOT_RUN when the real host, account or published update is unavailable.
+
+- [ ] On each target, verify the packaged app shows `1.7.1` metadata and About shows `v1.7.1`. Check updater metadata for the platform and architecture and verify installer SHA-256 against the release assets.
+- [ ] Upgrade from fork v1.6.4 on an existing profile and check that preferences, the pet and the HUD survive. Exercise the x64 and ARM64 installers on matching Windows hardware.
+- [ ] Trigger end-of-turn cards in Codex and Antigravity and a task-completion card. Check visibility, no duplicate card on repeated events, and automatic dismissal.
+- [ ] Use two real local Codex profiles and verify session isolation. Jump to a real Claude Desktop session with one and two instances, and exercise the supported KDE, Windows, t3code and CodeBuddy focus targets.
+- [ ] Start and end Meeting Mode. Check visibility restoration, Do Not Disturb and the native approval fallback while hidden.
+- [ ] Check Remote SSH reverse forwarding and stdio fallback, three selected quota coins and DeepSeek balance, Qoder task delegation, Copilot HUD cleanup and theme fallback.
+- [ ] Run the updater metadata audit for `playertwo1/clawd-on-desk`. After publishing, exercise a live update from v1.6.4 including Restart Now and Later.
+
+The fork WinGet identifier is `playertwo1.clawd-on-desk`. Komac's update flow needs an existing manifest under this identifier before it can update the catalog. The upstream WinGet history below applies to `rullerzhou-afk.clawd-on-desk`.
+
 ### v1.7.0 Draft Smoke Checklist
 
 Run checks from the draft release installer or package artifact. Record the

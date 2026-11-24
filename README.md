@@ -7,7 +7,7 @@
   <p><b>A pixel desktop pet that reacts to your AI coding agent in real time.</b></p>
   <p>English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ko-KR.md">한국어</a> · <a href="README.ja-JP.md">日本語</a> · <a href="README.es.md">Español</a></p>
   <a href="https://github.com/rullerzhou-afk/clawd-on-desk/stargazers"><img src="https://img.shields.io/github/stars/rullerzhou-afk/clawd-on-desk?style=flat-square" alt="Stars"></a>
-  <a href="https://github.com/rullerzhou-afk/clawd-on-desk/releases"><img src="https://img.shields.io/github/v/release/rullerzhou-afk/clawd-on-desk?label=version&style=flat-square" alt="Version"></a>
+  <a href="https://github.com/playertwo1/clawd-on-desk/releases"><img src="https://img.shields.io/github/v/release/playertwo1/clawd-on-desk?label=version&style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
   <a href="https://github.com/hesreallyhim/awesome-claude-code"><img src="https://awesome.re/mentioned-badge-flat.svg" alt="Mentioned in Awesome Claude Code"></a>
@@ -19,6 +19,18 @@
 </p>
 
 Start a long task, walk away, and come back when the crab tells you it's done. Clawd thinks while you prompt, types while tools run, juggles when subagents pile up, pops a card when a tool needs your approval, and dozes off when you step away.
+
+## What's new in fork v1.7.1
+
+This fork integrates [Clawd on Desk v1.7.0](docs/releases/release-v1.7.0.md), originally created by [rullerzhou-afk](https://github.com/rullerzhou-afk/clawd-on-desk) under [AGPL-3.0](LICENSE). The fork retains its end-of-turn and task-completion cards, automatic card dismissal, and updater feed at [playertwo1/clawd-on-desk](https://github.com/playertwo1/clawd-on-desk/releases).
+
+- **Codex** tracks multiple local profiles and separates their sessions and subagent completion.
+- **Session focus** improves on KDE Plasma 6 Wayland and Windows, with t3code targets and native CodeBuddy IDE conversation links on supported macOS builds.
+- **Remote SSH** adds a stdio transport for hosts that deny reverse forwarding. Run **Deploy / Repair Hooks** on existing hosts to refresh the bridge.
+- **Meeting Mode** temporarily hides the pet, HUD and bubbles and restores your previous visibility and Do Not Disturb settings when it ends.
+- **Quota** lets you choose up to three coins beside the pet and optionally track DeepSeek prepaid balance.
+- **Qoder Desktop** shows native chat titles, context usage and delegated tasks. **Copilot** adds HUD rows when sessions become active and removes them when they end.
+- **Theme appearance** follows the system or your setting and falls back to the same theme's light assets if its dark assets cannot load.
 
 ## Features
 
@@ -34,13 +46,13 @@ Every feature in detail: **[docs/guides/features.md](docs/guides/features.md)**
 
 ## Quick Start
 
-Download the latest installer from **[GitHub Releases](https://github.com/rullerzhou-afk/clawd-on-desk/releases/latest)**:
+Download the latest installer from **[GitHub Releases](https://github.com/playertwo1/clawd-on-desk/releases/latest)**:
 
 | Platform | Download |
 |---|---|
 | Windows | `Clawd-on-Desk-Setup-<version>-x64.exe` or `-arm64.exe` |
-| macOS | `.dmg`, or `brew install --cask clawd-on-desk` |
-| Linux | `.AppImage` (in-app updates), or `.deb` with [APT setup / migration](docs/guides/apt-setup.md) (Homebrew also works on x86_64) |
+| macOS | `.dmg` |
+| Linux | `.AppImage` (in-app updates) or `.deb` from the fork release |
 
 Launch Clawd and it starts reacting right away: Claude Code and Codex are connected on first launch. Every other agent is one click away in **Settings → AI Coding Tools**.
 
@@ -52,7 +64,7 @@ Only needed for contributing, testing unreleased code, or debugging integrations
 
 ```bash
 # Clone the repo
-git clone https://github.com/rullerzhou-afk/clawd-on-desk.git
+git clone https://github.com/playertwo1/clawd-on-desk.git
 cd clawd-on-desk
 
 # Install dependencies
@@ -148,7 +160,7 @@ Clawd on Desk is a community-driven project. Bug reports, feature ideas, and pul
 
 ### Contributors
 
-Thanks to everyone who has helped make Clawd better:
+Thanks to everyone who has helped make Clawd better, including [@playertwo1](https://github.com/playertwo1) and [@RomanticTinkerer](https://github.com/RomanticTinkerer).
 
 <a href="https://github.com/rullerzhou-afk/clawd-on-desk/graphs/contributors">
   <img src="assets/readme/contributors.svg" width="900" alt="Clawd on Desk contributors">

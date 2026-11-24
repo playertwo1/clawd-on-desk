@@ -190,7 +190,7 @@ jobs:
           mkdir -p generated
           # Each URL carries an explicit |<architecture> suffix, which komac
           # ranks above both its own filename inference and PE-header analysis.
-          komac update rullerzhou-afk.clawd-on-desk \
+          komac update playertwo1.clawd-on-desk \
             --version "${TAG#v}" \
             --urls "${urls[@]}" \
             --dry-run \
