@@ -16,7 +16,7 @@ const {
 } = require("../src/session-focus-handoff");
 const { discoverDshDesktopSync } = require("../hooks/dsh-install");
 const { makeSessionKey } = require("../src/session-key");
-const { getSessionFocusTarget, getSessionFocusWtHwnd, mergeSessionFocusEntry } = require("../src/session-focus");
+const { getSessionFocusTarget, getSessionFocusWtHwnd, getTerminalFocusSourcePid, mergeSessionFocusEntry } = require("../src/session-focus");
 const { buildPermissionFocusEntry } = require("../src/permission").__test;
 
 const DSH_PLIST = [
@@ -326,13 +326,13 @@ describe("session focus handoff", () => {
     const calls = [];
     const context = {
       focusTerminalWindow: (request) => { calls.push(request); return true; },
-      getSessionFocusWtHwnd,
+      getSessionFocusWtHwnd, getTerminalFocusSourcePid,
     };
     vm.createContext(context);
     vm.runInContext(main.slice(begin, end), context);
 
     assert.strictEqual(context.focusTerminalSession({
-      sourcePid: 101, claudeEntrypoint: "claude-desktop", wtHwnd: "81", cwd: "C:/work",
+      sourcePid: 101, agentPid: 201, claudeEntrypoint: "claude-desktop", wtHwnd: "81", cwd: "C:/work",
     }, "desktop-session", "hud"), true);
     assert.strictEqual(context.focusTerminalSession({
       sourcePid: 102, wtHwnd: "81", cwd: "C:/work",
@@ -340,7 +340,7 @@ describe("session focus handoff", () => {
 
     assert.strictEqual(calls[0].wtHwnd, null,
       "a Claude Desktop row must not raise whatever WT window it stored");
-    assert.strictEqual(calls[0].sourcePid, 101);
+    assert.strictEqual(calls[0].sourcePid, 201, "Claude Desktop uses the agent PID");
     assert.strictEqual(calls[1].wtHwnd, "81", "ordinary terminal sessions keep their handle");
   });
 
