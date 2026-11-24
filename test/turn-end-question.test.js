@@ -71,7 +71,7 @@ describe("/state route raises the card for Codex and Antigravity", () => {
   const { EventEmitter } = require("node:events");
   const { handleStatePost } = require("../src/server-route-state");
 
-  function harness() {
+  function harness(overrides = {}) {
     const calls = { shown: [], cleared: [], tracked: [], done: [] };
     const ctx = {
       STATE_SVGS: { idle: "x.svg", thinking: "x.svg", working: "x.svg", attention: "x.svg", error: "x.svg", notification: "x.svg", sleeping: "x.svg" },
@@ -83,6 +83,7 @@ describe("/state route raises the card for Codex and Antigravity", () => {
       trackClaudeTurnAskReminder: (p) => calls.tracked.push(p),
       resolveClaudeTurnAskReminder() {},
       showTaskDoneBubble: (c) => { calls.done.push(c); return true; },
+      ...overrides,
     };
     const recorder = { acceptedUnlessDnd() {}, droppedByDisabled() {}, droppedByDnd() {}, droppedInvalidAgent() {}, droppedUnsupported() {} };
     const post = (body) => new Promise((resolve) => {
@@ -133,4 +134,50 @@ describe("/state route raises the card for Codex and Antigravity", () => {
     assert.equal(calls.shown.length, 1);
     assert.equal(calls.shown[0].agentId, "codex");
   });
+  it("isolates Codex cards across rollout profiles and keeps the child Stop silent", async () => {
+    const { codexProfileIdentity, normalizeCodexProfileConfig } = require("../src/codex-profiles");
+    const home = path.join(os.tmpdir(), "clawd-card-profiles");
+    const companyHome = path.join(home, "company-codex");
+    const profiles = normalizeCodexProfileConfig({
+      profiles: [{ id: "company", label: "Company", home: companyHome }],
+    }, { home, env: {} });
+    const rawId = "codex:shared-thread";
+    const personalId = codexProfileIdentity(rawId, profiles[0]).sessionId;
+    const companyId = codexProfileIdentity(rawId, profiles[1]).sessionId;
+    const childId = codexProfileIdentity("codex:child-thread", profiles[1]).sessionId;
+    const updates = [];
+    const { calls, post } = harness({
+      getCodexProfiles: () => profiles,
+      codexSubagentClassifier: {
+        registerSession: (id) => id === childId ? "subagent" : "interactive",
+      },
+      updateSession: (id, state) => { updates.push([id, state]); return true; },
+    });
+    const stop = {
+      state: "attention", event: "Stop", session_id: rawId, agent_id: "codex",
+      hook_source: "codex-official", assistant_last_output: "Quer continuar?",
+    };
+    const transcript_path = path.join(companyHome, "sessions", "rollout.jsonl");
+    assert.equal((await post(stop)).statusCode, 200);
+    assert.equal((await post({ ...stop, transcript_path })).statusCode, 200);
+    assert.equal((await post({ ...stop, session_id: "codex:child-thread", transcript_path })).statusCode, 200);
+    assert.equal((await post({ ...stop, transcript_path, assistant_last_output: "Concluído." })).statusCode, 200);
+    assert.deepEqual(calls.shown.map((card) => card.sessionId), [personalId, companyId]);
+    assert.deepEqual(calls.done.map((card) => card.sessionId), [companyId]);
+    assert.deepEqual(updates, [
+      [personalId, "attention"], [companyId, "attention"],
+      [childId, "idle"], [companyId, "attention"],
+    ]);
+  });
+
+  it("keeps rejected Codex updates from creating cards", async () => {
+    const { calls, post } = harness({ updateSession: () => false });
+    assert.equal((await post({
+      state: "attention", event: "Stop", session_id: "codex:stale", agent_id: "codex",
+      hook_source: "codex-official", assistant_last_output: "Quer continuar?",
+    })).statusCode, 200);
+    assert.deepEqual(calls.shown, []);
+    assert.deepEqual(calls.done, []);
+  });
+
 });

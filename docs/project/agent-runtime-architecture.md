@@ -383,6 +383,8 @@ CodeBuddy 状态同步（Claude Code 兼容 hook，command）：
     → 同上状态机（agent_id: codebuddy）
   Hook 注册到 ~/.codebuddy/settings.json，格式与 Claude Code 完全兼容。
   command hook 对所有事件都输出 `{}`，不做工具或权限决定；阻塞式审批只走 PermissionRequest HTTP hook。
+  Windows 点击时从深层 agent-harness.exe 路径向上定位安装目录；harness 退出而 sourcePid 仍活时，
+  会话按普通会话超时退场，不立即删除。
 
 自定义 HTTP Agent（动态注册，state-only）：
   Settings 选择本机可执行文件
@@ -428,14 +430,16 @@ Qoder / Qoder CN hooks（同一个 `qoder` agent、state-only）：
 Qoder 会话标题（本机、state-only）：
   Hook 转发显式标题与 transcript 路径，保持 stdout 为 `{}` 和原生权限流程不变。
   `agent-runtime-main` 先接受生命周期，再让 `qoder-session-title` 对 SessionStart /
-  UserPromptSubmit / Stop 异步增量读取；工具、权限、通知事件不触发扫描，显式标题也不触发 I/O。
+  UserPromptSubmit / Stop 异步增量读取 JSONL；工具、权限、通知事件不触发 JSONL 扫描，显式标题也不触发 JSONL I/O。
   仅处理 enabled、本机且非 WSL 的 Qoder 会话，远端 profile / host 的路径不在本机读取。
   标题读取保持完整的顺序解析与 custom-title 优先级，不采用会遗漏中段改名的头尾采样。
   结果通过既有 `updateSessionMetadata` 扇出到共享 snapshot，不改活动时间、状态、recentEvents 或 recap。
   显式生命周期标题和 metadata-only 标题均同步记入 tracker；未读取/轮转的基线或已排队的旧扫描
   不覆盖显式标题，之后观察到的新原生标题记录才可替代它（两个来源没有可比较的原生时间戳）。
-  同 id 的 SessionStart 取消旧读取但保留显式标题；SessionEnd、禁用与退出完整清理缓存。
-  每个会话串行读取；完成时还需核对存活会话、
+  对 JSONL tracker，同 id 的 SessionStart 取消旧读取但保留显式标题；SessionEnd、禁用与退出完整清理缓存。
+  新版桌面端通过 `qoder-desktop-sessions` 只读查询两版 `main.sqlite` 中的标题、用量、委派与归档/删除状态。本机首个事件和 SessionStart 查库，未确认委派时在 Stop / Notification 前复查，轮询仅为到期条目开库。确认的委派子行会隐藏并把活动投到父行，父行的完成提示照常。
+  SQLite 在 hook 或轮询中确认委派、归档或删除并撤行时，会作废该会话未完成的 JSONL 标题扫描。
+  JSONL 按会话串行读取；完成时还需核对存活会话、
   本机身份、当前路径及标题，防止旧异步结果污染重开的会话。读取中断时逐 chunk 保持 offset 与 partial
   一致，重试可继续完整解析；FileHandle 始终在 finally 中关闭。
 
@@ -915,6 +919,7 @@ Claude Code 用 `CLAUDE_CONFIG_DIR` 选择配置目录（settings、会话、登
 - 历史 key `claudeQuotaCollectionEnabled` 现在是本机 Claude statusline metadata（context window + 可用 quota）的唯一用户授权。关闭或卸载时，server 先用进程内 suppression 挡住未结尾包，再 ownership-safe 卸载并清除 `profileId="local"`（含 WSL）会话的 statusline 分母所有权，同时从 account-quota store 定向删除所有非 `remote:` 来源的 `claudeQuota` 并立即广播、持久化；同源 Codex / Antigravity provider 与 Remote SSH quota 保留。关闭态启动也会执行同一缓存迁移。statusline 上报拥有 limit，普通 transcript hook 仍可更新 used，并按保留的权威 limit 重算 percent。
 - 本机第三方 statusline 共存由显式 Settings 开启动作触发：`claude-statusline-consent.js` 在 server mutation 队列外询问用户，确认后携带原槽 SHA-256 重入同一队列；原槽变化则拒绝。安装器把完整原对象存入配置目录的 `hooks/clawd-statusline-local-chain.json`（owner/version/随机 id/精确 wrapper command），只替换 command，保留 padding/refreshInterval 等字段。`--local-chain <id>` 将同一 JSON 交给原命令，stdout 仍由原命令独占，Clawd telemetry 并行发送。关闭/卸载仅在 wrapper 与恢复记录匹配时恢复原对象；第三方接管后不反抢、不删恢复记录。缺失/损坏的恢复记录不降级覆盖。启动同步只续用已确认链，不会弹框或自动接管。远程 `--chain` 与旧 sidecar 合约保持独立。
 - Kimi Code quota 是独立的 main-process、manual-only transport：只有 Settings 中显式 Connect/Replace/Reconnect/Refresh 才会请求固定的 `https://api.kimi.com/coding/v1/usages`，app ready、hook、resume、Dashboard show 都不联网。Kimi Code API Key 以 Electron `safeStorage` 密文保存在 `~/.clawd/kimi-code-quota-credential.json`，不进入 prefs、settings snapshot、日志或 `account-quota.json`；Linux `basic_text` backend fail closed。每次保存生成与 Key 无关的随机 `credentialId`，`~/.clawd/kimi-quota-runtime.json` 在 quota store 同步 flush 后才记录该 id；启动发现 id 缺失/不一致会先清理本机 Kimi cache，避免 Replace Key 的 crash 窗口把旧账户额度标成新连接。`kimiQuotaCollectionEnabled` 是 command-only durable gate，runtime 在请求 admission 和 response commit 两端都重读该 gate 与 `kimi-cli.enabled`；hook payload 永远不是 Kimi quota 来源。Disconnect 后的重连走专用 trusted IPC `settings:kimi-quota-reconnect` → `runtime.reconnect()`：只读校验本地密文可用后 re-enable 并立即走与 Refresh 完全相同的 admission/commit 路径，属于用户显式手动动作，Key 始终不离开 main process。
+- DeepSeek 预付余额由 `deepseek-balance-runtime.js` 独立持有，默认关闭。`deepseekBalanceCollectionEnabled`、`deepseek-harness.enabled` 与已存 key 同时满足才立即查询官方 `https://api.deepseek.com/user/balance`，之后每 5 分钟查询；suspend 暂停、resume 重读 gates、before-quit dispose。generation + AbortController 丢弃旧结果，取消中的请求仍占据单一在飞槽。401 拒绝标记与 credentialId 同步保存在 runtime journal，重启后同一 key 仍停表；显式重连、更换或忘记 key 才清除，其他错误保留旧值并在下个周期重试。凭据通过共享 `quota-credential-store.js` 使用 safeStorage 加密存于 `~/.clawd/deepseek-balance-credential.json`，Linux basic_text fail closed；key 不进入 prefs、快照或日志。同步 flush 本机额度后才原子写 `deepseek-balance-runtime.json` 的 credentialId / currency / baseline / lastAmount / capturedAt（可另带 rejected 标记，首次 401 允许只有身份与拒绝标记），写失败清掉额度，启动先核对 credentialId。充值增加至少 0.01 或换账户/币种时重设油表基准。HTTP `/state` 永不接收 DeepSeek 额度；只有本机 owner 的 `commitLocalDeepseekQuota` 能提交。硬币为单环，永远显示剩余，12 分钟变灰；Dashboard 复用 quota bar，首版无余额提醒。
 - `server.getClaudeHookHealthStatus()` 暴露供 Doctor 使用的只读状态（`healthy` / `repairing` / `degraded` / `manual-fix-required` / `guarded` / `stopped`），与既有的 `getClaudeHookGuardStatus()`（仅覆盖 suspicious-shrink 一种通知）并存，互不替代。
 - settings.json 读取契约（#657）：installer 的四个读取入口（同步/异步 `registerHooks`、`unregisterAutoStart`、`isAutoStartRegistered`）与 health inspector、watcher 的 resync / snapshot 都只忽略文件绝对开头单个 UTF-8 BOM（`hooks/json-utils.js` 的 `stripUtf8Bom`）；字符串值中间的 U+FEFF 原样保留。BOM-only、BOM + 损坏 JSON 和普通坏 JSON 仍按不可读/读取失败处理，不自动覆盖，`unregisterAutoStart` 失败继续返回 false。配置已是 canonical（即使带 BOM）的重复注册为 no-op，不因去 BOM 重写文件或产生新备份；需要迁移时沿用原子写入与备份，备份保留原 BOM 字节，写回采用既有 BOM-free JSON 格式。installer 的两个注册读取入口对合法 JSON 但非对象（数组/标量）的顶层 fail closed，避免在 mutation 前把错误 schema 当空配置覆盖。此契约只覆盖 Clawd 自身读取；上游 Claude Code 自身能否读取带 BOM 的 canonical 配置并未由本补丁证明。
 
@@ -1017,6 +1022,7 @@ opencode、MiMo Code、OpenClaw、Hermes 和 DeepSeek Harness 是 plugin 形式�
 - CJS hook 脚本通过 `hooks/shared-process.js` 的 `createPidResolver()` 与 lifecycle context 遍历进程树定位终端应用 PID（Windows Terminal、VS Code、iTerm2 等）；opencode-family plugin 保留自己的内部 resolver
 - 不要用 `process.ppid` 做轻量替代：Claude Code / hook 进程链里它通常只是临时 shell PID，不稳定也不可持久化
 - 本机 Windows Codex Desktop 的 lifecycle context 会以已验证的 app-server `agentPid` 作为 `source_pid` 和 v2 cache 的 `stablePid`，避免 `SessionStart` 的短命 PowerShell wrapper 退出后让 cache-only prompt 丢失身份。Desktop 判定只认 `codex-originator.js` 的已知 originator；本机 Windows 无 transcript 的 ephemeral hook 缺少 originator/source 且不是 headless/subagent 时，可用同一 allowlist 验证 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`，并上报 originator 供同进程多聊天去重与 server-side process routing 使用；显式 CLI / unknown originator 优先，环境变量不得把来源不明的 child permission 提升为交互式。WSL / interop / remote / headless 不走该偏好；其他 agent 和 Codex CLI 仍保持 terminal-first 与双 PID liveness，prompt / SessionEnd 永不补做快照，Stop 不删 cache。
+- 本机 Windows Claude 桌面版（仅 canonical `claude-code`、`CLAUDE_CODE_ENTRYPOINT=claude-desktop` 且非 headless）同样以 CLI `agentPid` 作为 `source_pid` 和新建 v2 cache 的 `stablePid`，其他 Claude 会话仍以终端优先。升级前留下的旧缓存命中时只修正上报的 `source_pid`，磁盘上的 `stablePid` 不改写；恢复租约在 source 移到 agent 后沿用 agent 的启动标识。HUD / Dashboard 聚焦这类会话时不使用存下的 WT 窗口句柄，由 CLI 进程链（以及已有的窗口缓存）找出 Claude 窗口。
 - official `SessionStart` payload 的 `source` 是生命周期原因，不是 session provenance：只有事件名精确为 `SessionStart` 且值精确为 `startup` / `resume` / `clear` / `compact` / `fork` 时，才不阻止上述 audited Desktop env 预热；该原因留在原 payload，不写入 `codex_source`。`session_meta.source` 始终是 provenance，显式 originator、未知/非字符串 source、headless/subagent 与 remote/WSL gate 不变；`PermissionRequest` 不获得该例外。五个值由 official [rust-v0.162.0-alpha.2 SessionStart source（commit 74e804d）](https://github.com/openai/codex/blob/74e804deeb1241d5fe699b31fb319f7d46454c42/codex-rs/hooks/src/events/session_start.rs) 的 enum 和 serializer 核实；[release hook reference](https://learn.chatgpt.com/docs/hooks#sessionstart) 目前仍列四个值，并说明 main schema 可能先于 release docs。
 - Windows shared resolver 的全量快照在 `Get-CimInstance Win32_Process` 用 server-side `-Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate` 请求实际需要的属性，避免取回所有 CIM 属性后再丢弃。原 foreground interop、Windows Terminal HWND、`Select-Object` 和 UTC ticks `StartIdentity` 输出保留；noarg、CLI、其他 adapter 的 PID walk / shape / gates 不变。
 - Codex adapter 的 Windows 全量进程快照对普通事件使用共享 resolver 已有的 `windowsSnapshotTimeoutMs:5000`（上限 5 秒），`Interrupt` 保持 3000ms 以遵守其 upstream 3 秒外层 timeout；其他调用者的默认值仍为 3 秒。timeout 后保持无进程元数据，不重试、不伪造 PID。Windows `UserPromptSubmit` / `SessionEnd` 仍只读 cache，不增加快照。生命周期 source 误判和 fresh query 超时是独立故障：正确识别 `fork` 不能修复一次超时的预热，有界 timeout 也不保证查询必能完成。真实 HUD 首轮聚焦仍需 native hook 和 GUI 验证。

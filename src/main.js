@@ -71,6 +71,7 @@ if (_xwaylandRelaunch) {
 }
 
 const { clampTextScale, scaleWidth, scaleHeight, resolveTextScaleForKey } = require("./text-scale");
+const { estimateHostBootTimeMs } = require("./host-boot-time");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -100,6 +101,9 @@ const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
 const { createKimiQuotaCredentialStore } = require("./kimi-quota-credential-store");
 const { createKimiQuotaRuntime } = require("./kimi-quota-runtime");
+const { createDeepseekBalanceClient } = require("./deepseek-balance-client");
+const { createDeepseekBalanceCredentialStore } = require("./deepseek-balance-credential-store");
+const { createDeepseekBalanceRuntime } = require("./deepseek-balance-runtime");
 const {
   getPetTintIdForTheme,
   resolvePetTintPayload,
@@ -194,6 +198,7 @@ const { startMobilePreviewServerSafely } = require("./network/mobile-preview-lif
 const createThemeFadeSequencer = require("./theme-fade-sequencer");
 const createThemeRuntime = require("./theme-runtime");
 const createAgentRuntimeMain = require("./agent-runtime-main");
+const { loadCodexProfiles } = require("./codex-profiles");
 const createFloatingWindowRuntime = require("./floating-window-runtime");
 const createPetWindowRuntime = require("./pet-window-runtime");
 const { createRendererConfigChannel } = require("./renderer-config-channel");
@@ -203,13 +208,15 @@ const { createDisplayedVisualProjection } = require("./displayed-visual-projecti
 const { getRightSideMirrorFiles, isVisualMirrored, resolveMirroredFile } = require("./mirrored-files");
 const { createTestReactionHandler } = require("./test-reaction");
 const createMacHideController = require("./mac-hide");
+const { createMeetingModeController } = require("./meeting-mode");
 const {
   getFocusableLocalHudSessionIds: selectFocusableLocalHudSessionIds,
   getSessionFocusTarget,
   getTerminalFocusSourcePid,
+  getSessionFocusWtHwnd,
   mergeSessionFocusEntry,
 } = require("./session-focus");
-const { focusCodexThreadTarget, focusDshDesktopTarget } = require("./session-focus-handoff");
+const { focusCodexThreadTarget, focusDshDesktopTarget, focusCodeBuddyIdeTarget } = require("./session-focus-handoff");
 const { publishDshFocus } = require("./dsh-focus-stream");
 const { isSessionInProgress } = require("./state-session-snapshot");
 const { restoreSessionsFromRecoveryLeases } = require("./session-recovery-loader");
@@ -1439,8 +1446,10 @@ let sessionHudShowElapsed = _settingsController.get("sessionHudShowElapsed");
 let sessionHudShowContextUsage = _settingsController.get("sessionHudShowContextUsage");
 let sessionHudShowQuota = _settingsController.get("sessionHudShowQuota");
 let quotaRingDisplayMode = _settingsController.get("quotaRingDisplayMode");
+let quotaRingShownProviders = _settingsController.get("quotaRingShownProviders");
 let quotaRingHiddenProviders = _settingsController.get("quotaRingHiddenProviders");
 let claudeQuotaCollectionEnabled = _settingsController.get("claudeQuotaCollectionEnabled");
+let deepseekBalanceCollectionEnabled = _settingsController.get("deepseekBalanceCollectionEnabled");
 let kimiQuotaCollectionEnabled = _settingsController.get("kimiQuotaCollectionEnabled");
 let quotaMergeSources = _settingsController.get("quotaMergeSources");
 let sessionHudCleanupDetached = _settingsController.get("sessionHudCleanupDetached");
@@ -1590,6 +1599,12 @@ function prepManualPetVisibility() {
 }
 function togglePetVisibility() {
   prepManualPetVisibility();
+  // #1382: during meeting mode the pet is hidden on purpose, so the toggle
+  // means "show it": end the meeting, then apply the user's show intent to
+  // clear fullscreen auto-hide too (the meeting's own restore preserves it).
+  if (meetingMode.noteUserOverride("pet-shown")) {
+    return petWindowRuntime.setPetHidden(false);
+  }
   return petWindowRuntime.togglePetVisibility();
 }
 // Explicit-direction variant for the menus: the Show/Hide Pet items apply the
@@ -1598,9 +1613,13 @@ function togglePetVisibility() {
 // action (see menu.js).
 function setPetVisibility(visible) {
   prepManualPetVisibility();
+  if (visible) meetingMode.noteUserOverride("pet-shown");
   return petWindowRuntime.setPetHidden(!visible);
 }
 function bringPetToPrimaryDisplay() {
+  if (petWindowRuntime.isPetEffectivelyHidden() && !_mini.getMiniMode() && !_mini.getMiniTransitioning()) {
+    meetingMode.noteUserOverride("pet-shown");
+  }
   prepManualPetVisibility();
   return petWindowRuntime.bringPetToPrimaryDisplay();
 }
@@ -1777,6 +1796,46 @@ function broadcastSettingsWindow(channel, payload) {
     if (!settingsWin.webContents || settingsWin.webContents.isDestroyed()) return;
     settingsWin.webContents.send(channel, payload);
   } catch {}
+}
+
+let lastQuotaRingProvidersWindow = null;
+let lastQuotaRingProvidersSignature = null;
+function broadcastQuotaRingProviders(snapshot) {
+  const settingsWin = getSettingsWindow();
+  if (!settingsWin || settingsWin.isDestroyed()
+    || !settingsWin.webContents || settingsWin.webContents.isDestroyed()) {
+    lastQuotaRingProvidersWindow = null;
+    lastQuotaRingProvidersSignature = null;
+    return;
+  }
+  const providers = _ringGeom.listQuotaRingProviders(
+    snapshot, quotaRingHiddenProviders, quotaRingShownProviders
+  );
+  const signature = JSON.stringify(providers);
+  if (settingsWin === lastQuotaRingProvidersWindow
+    && signature === lastQuotaRingProvidersSignature) return;
+  broadcastSettingsWindow("settings:quota-ring-providers-changed", providers);
+  lastQuotaRingProvidersWindow = settingsWin;
+  lastQuotaRingProvidersSignature = signature;
+}
+
+let lastDeepseekBalanceStatusWindow = null;
+let lastDeepseekBalanceStatusSignature = null;
+function broadcastDeepseekBalanceStatus() {
+  const settingsWin = getSettingsWindow();
+  if (!settingsWin || settingsWin.isDestroyed()
+      || !settingsWin.webContents || settingsWin.webContents.isDestroyed()) {
+    lastDeepseekBalanceStatusWindow = null;
+    lastDeepseekBalanceStatusSignature = null;
+    return;
+  }
+  const status = _deepseekBalanceRuntime.getStatus();
+  const signature = JSON.stringify(status);
+  if (settingsWin === lastDeepseekBalanceStatusWindow
+      && signature === lastDeepseekBalanceStatusSignature) return;
+  broadcastSettingsWindow("settings:deepseek-balance-status-changed", status);
+  lastDeepseekBalanceStatusWindow = settingsWin;
+  lastDeepseekBalanceStatusSignature = signature;
 }
 
 function getThemeSoundPreloadUrls() {
@@ -2368,6 +2427,7 @@ function getPendingPermissionFocusEntry(sessionId) {
   if (entry.model) focusEntry.model = entry.model;
   if (entry.codexOriginator) focusEntry.codexOriginator = entry.codexOriginator;
   if (entry.codexSource) focusEntry.codexSource = entry.codexSource;
+  if (entry.codexProfileId) focusEntry.codexProfileId = entry.codexProfileId;
   return focusEntry;
 }
 
@@ -2509,14 +2569,17 @@ const recapRuntime = createRecapRuntime({
   onRecorded: () => settingsWindowRuntime.notifyRecapChanged(),
 });
 
+const codexProfiles = loadCodexProfiles({ logWarn: console.warn });
 const _stateCtx = {
   get theme() { return getActiveTheme(); },
   get win() { return win; },
   get hitWin() { return hitWin; },
   // Last-known account quota survives app restarts (state-account-quota.js).
   accountQuotaPersistPath: require("./state-account-quota").DEFAULT_PERSIST_PATH,
+  codexProfiles,
   recapSink: recapRuntime,
   get claudeQuotaCollectionEnabled() { return claudeQuotaCollectionEnabled; },
+  get deepseekBalanceCollectionEnabled() { return deepseekBalanceCollectionEnabled; },
   get kimiQuotaCollectionEnabled() { return kimiQuotaCollectionEnabled; },
   get quotaMergeSources() { return quotaMergeSources; },
   get doNotDisturb() { return doNotDisturb; },
@@ -2572,6 +2635,7 @@ const _stateCtx = {
     reconcilePowerSaveBlocker();
     broadcastDashboardSessionSnapshot(snapshot);
     broadcastSessionHudSnapshot(snapshot);
+    broadcastQuotaRingProviders(snapshot);
     repositionFloatingBubbles();
     // R1a: best-effort completion notifications. Must never throw or block the
     // broadcast — the companion computes synchronously and fires sends async.
@@ -2685,6 +2749,22 @@ displayedVisualProjection = createDisplayedVisualProjection({
     petWindowRuntime.reloadWindowWebContents(win);
   },
 });
+const _deepseekBalanceRuntime = createDeepseekBalanceRuntime({
+  credentialStore: createDeepseekBalanceCredentialStore({ safeStorage }),
+  client: createDeepseekBalanceClient(),
+  getSettingsSnapshot: () => _settingsController.getSnapshot(),
+  setCollectionEnabled: (enabled) => _settingsController.applyCommand(
+    "setDeepseekBalanceCollectionEnabled", { enabled }
+  ),
+  commitLocalDeepseekQuota: (quota) => _state.commitLocalDeepseekQuota(quota),
+  clearLocalDeepseekQuota: () => _state.clearLocalDeepseekQuota(),
+  onStatusChanged: () => broadcastDeepseekBalanceStatus(),
+});
+_settingsController.subscribeKey("deepseekBalanceCollectionEnabled", () => {
+  _deepseekBalanceRuntime.onSettingsChanged();
+});
+_settingsController.subscribeKey("agents", () => _deepseekBalanceRuntime.onSettingsChanged());
+app.on("before-quit", () => _deepseekBalanceRuntime.dispose());
 const _kimiQuotaCredentialStore = createKimiQuotaCredentialStore({ safeStorage });
 const _kimiQuotaRuntime = createKimiQuotaRuntime({
   credentialStore: _kimiQuotaCredentialStore,
@@ -2714,10 +2794,39 @@ const { setState, applyState, updateSession, resolveDisplayState, getSvgOverride
         startStartupRecovery: _startStartupRecovery } = _state;
 const sessions = _state.sessions;
 
-function disableDoNotDisturb() {
+function disableDoNotDisturbAndObserveQuota() {
   const result = disableDoNotDisturbState();
   quotaAlertsRuntime?.observeQuota();
   return result;
+}
+
+// #1382: meeting mode drives the manual pet hide and DND. Its own restore
+// calls the raw setters below; the user-facing setters above end the meeting
+// first when the user shows the pet or wakes Clawd.
+const meetingMode = createMeetingModeController({
+  hidePet: () => {
+    prepManualPetVisibility();
+    petWindowRuntime.setPetHidden(true);
+  },
+  showPet: () => {
+    prepManualPetVisibility();
+    petWindowRuntime.setPetHidden(false, { keepFullscreenAutoHide: true });
+  },
+  isBusy: () => _mini.getMiniTransitioning(),
+  isPetHidden: () => petWindowRuntime.isPetHidden(),
+  enableDnd: () => enableDoNotDisturb(),
+  disableDnd: () => disableDoNotDisturbAndObserveQuota(),
+  isDnd: () => doNotDisturb,
+  onChange: () => {
+    buildTrayMenu();
+    buildContextMenu();
+  },
+  log: (message) => console.log(`Clawd: ${message}`),
+});
+
+function disableDoNotDisturb() {
+  if (meetingMode.noteUserOverride("wake") && !doNotDisturb) return undefined;
+  return disableDoNotDisturbAndObserveQuota();
 }
 
 function showQuotaAlert(event) {
@@ -2774,7 +2883,7 @@ sessionAutomationCoordinator = createSessionAutomationCoordinator({
 // (kept as a pure helper so the semantics are unit-tested).
 let powerSaveBlockerId = null;
 function anySessionInProgress() {
-  if (_state.hasActiveCodexSubagents()) return true;
+  if (_state.hasActiveCodexSubagents() || _state.hasActiveQoderSubagents()) return true;
   for (const [, s] of sessions) {
     if (isSessionInProgress(s)) return true;
   }
@@ -2861,6 +2970,9 @@ const {
   killFocusHelper,
   focusTerminalWindow,
   focusProcessAppWindow,
+  findCodeBuddyMacApp,
+  findCodeBuddyWindowsApp,
+  openCodeBuddyMacApp,
   captureGhosttyTerminalId,
   clearMacFocusCooldownTimer,
 } = _focus;
@@ -2874,7 +2986,7 @@ function focusTerminalSession(session, sessionId, requestSource) {
   if (!session || (!session.sourcePid && !session.orcaPaneKey)) return false;
   return focusTerminalWindow({
     sourcePid: getTerminalFocusSourcePid(session),
-    wtHwnd: session.wtHwnd,
+    wtHwnd: getSessionFocusWtHwnd(session),
     cwd: session.cwd,
     editor: session.editor,
     pidChain: session.pidChain,
@@ -2925,6 +3037,24 @@ function focusDashboardSession(sessionId, options = {}) {
     return true;
   }
 
+  if (focusTarget.type === "codebuddy-ide") {
+    const isWindowsHost = process.platform === "win32";
+    focusCodeBuddyIdeTarget({
+      shell,
+      focusEntry,
+      sessionId: id,
+      requestSource,
+      focusLog,
+      focusTerminalSession,
+      platform: process.platform,
+      findApp: isWindowsHost ? findCodeBuddyWindowsApp : findCodeBuddyMacApp,
+      // Windows has no bundle activation; leaving openApp unset makes a build
+      // without the route (or a failed deep link) use the window focus below.
+      ...(isWindowsHost ? {} : { openApp: openCodeBuddyMacApp }),
+    });
+    return true;
+  }
+
   if (focusTarget.type === "dsh-desktop" && focusTarget.url) {
     focusDshDesktopTarget({
       shell,
@@ -2945,7 +3075,7 @@ function focusDashboardSession(sessionId, options = {}) {
   if (focusEntry.platform === "webui") {
     focusLog(`focus result branch=none reason=webui-unfocusable source=${requestSource} sid=${id}`);
   } else {
-    focusLog(`focus result branch=none reason=no-source-pid source=${requestSource} sid=${id}`);
+    focusLog(`focus result branch=none reason=${focusTarget.reason || "no-source-pid"} source=${requestSource} sid=${id}`);
   }
   return false;
 }
@@ -3135,6 +3265,7 @@ const _sessionHud = require("./session-hud")({
   get sessionHudShowContextUsage() { return sessionHudShowContextUsage; },
   get sessionHudShowQuota() { return sessionHudShowQuota; },
   get quotaRingDisplayMode() { return quotaRingDisplayMode; },
+  get quotaRingShownProviders() { return quotaRingShownProviders; },
   get quotaRingHiddenProviders() { return quotaRingHiddenProviders; },
   get sessionHudPinned() { return sessionHudPinned; },
   get lowPowerIdleMode() { return lowPowerIdleMode; },
@@ -3163,6 +3294,11 @@ getSessionHudWindow = _sessionHud.getWindow;
 getQuotaRingWindow = _sessionHud.getQuotaRingWindow;
 
 agentRuntime = createAgentRuntimeMain({
+  // Local rollout files survive a host reboot; their old unfinished turns do
+  // not prove a Codex client has started again in this boot. Null means no
+  // boundary (uptime unavailable) and must not block startup.
+  localCodexBootTimeMs: estimateHostBootTimeMs(),
+  codexProfiles,
   getServer: () => _server,
   getStateRuntime: () => _state,
   getPermissionRuntime: () => _perm,
@@ -3193,6 +3329,9 @@ const _serverCtx = {
   get PASSTHROUGH_TOOLS() { return PASSTHROUGH_TOOLS; },
   get STATE_SVGS() { return _state.STATE_SVGS; },
   get sessions() { return sessions; },
+  getCodexProfiles: () => agentRuntime && typeof agentRuntime.getCodexProfiles === "function"
+    ? agentRuntime.getCodexProfiles()
+    : [],
   getCustomAgentIds: () => (_settingsController.get("customApplications") || [])
     .map((application) => application && application.id)
     .filter(Boolean),
@@ -4840,6 +4979,13 @@ const _menuCtx = {
   set contextMenu(v) { contextMenu = v; },
   enableDoNotDisturb: () => enableDoNotDisturb(),
   disableDoNotDisturb: () => disableDoNotDisturb(),
+  getMeetingMode: () => meetingMode.getState(),
+  startMeetingMode: (minutes) => {
+    // Keep a pre-existing OS hide after the meeting, without unhiding the app.
+    if (macHideController) macHideController.noteManualChange();
+    return meetingMode.start(minutes);
+  },
+  endMeetingMode: () => meetingMode.end("menu"),
   enterMiniViaMenu: () => {
     if (!disableMiniModeCached) enterMiniViaMenu();
   },
@@ -4967,10 +5113,11 @@ const SETTINGS_MIRROR_SETTERS = {
   sessionHudShowContextUsage: (v) => { sessionHudShowContextUsage = v; },
   sessionHudShowQuota: (v) => { sessionHudShowQuota = v; },
   quotaRingDisplayMode: (v) => { quotaRingDisplayMode = v; },
-  // Normalized to an array here as well as in prefs: this mirror also takes the
-  // value straight from a settings broadcast, and every consumer indexes it.
+  // Preserve null as automatic mode when mirroring settings broadcasts.
+  quotaRingShownProviders: (v) => { quotaRingShownProviders = Array.isArray(v) ? v : null; },
   quotaRingHiddenProviders: (v) => { quotaRingHiddenProviders = Array.isArray(v) ? v : []; },
   claudeQuotaCollectionEnabled: (v) => { claudeQuotaCollectionEnabled = v; },
+  deepseekBalanceCollectionEnabled: (v) => { deepseekBalanceCollectionEnabled = v; },
   kimiQuotaCollectionEnabled: (v) => { kimiQuotaCollectionEnabled = v; },
   quotaMergeSources: (v) => { quotaMergeSources = v; },
   sessionHudCleanupDetached: (v) => { sessionHudCleanupDetached = v; },
@@ -5369,7 +5516,8 @@ const settingsIpcRuntime = registerSettingsIpc({
   getQuotaSourceCount: () => _state.getQuotaSourceCount(),
   getQuotaRingProviders: () => _ringGeom.listQuotaRingProviders(
     _state.buildSessionSnapshot(),
-    quotaRingHiddenProviders
+    quotaRingHiddenProviders,
+    quotaRingShownProviders
   ),
   themeLoader,
   codexPetMain,
@@ -5412,6 +5560,7 @@ const settingsIpcRuntime = registerSettingsIpc({
   getHookServerPort: () => getHookServerPort(),
   getRecentHookEvents: (options) => _server.getRecentHookEvents(options),
   kimiQuotaRuntime: _kimiQuotaRuntime,
+  deepseekBalanceRuntime: _deepseekBalanceRuntime,
   checkForUpdates,
   getUpdateCheckSnapshot,
   clearUpdateError,
@@ -5726,6 +5875,9 @@ function createWindow() {
       }
       sessionLog(`startup recovery restored sessions=${restoredSessionIds.join(",")}`);
     }
+    // Restored Qoder rows may predate delegation/archive recognition in
+    // main.sqlite; reconcile them against the native database once on launch.
+    try { agentRuntime?.sweepQoderDesktopSessions?.(); } catch {}
     void _remoteSshIpc.connectOnLaunchProfiles().catch((err) => {
       console.warn("Clawd remote-ssh: connect-on-launch failed:", err && err.message);
     });
@@ -5870,6 +6022,8 @@ function computeFinalDragBounds(bounds, size, clampPosition = clampToScreenVisua
 
 // ── Mini Mode — initialized here after state module ──
 const _miniCtx = {
+  isMeetingModeActive: () => meetingMode.isActive(),
+  applyDndSleepState: () => _state.applyDndSleepState(),
   hasPendingReminderAttention: () => _state.hasPendingReminderAttention(),
   getReminderReselectionOptions: (state) => _state.getReminderReselectionOptions(state),
   get theme() { return getActiveTheme(); },
@@ -6154,6 +6308,7 @@ if (!gotTheLock) {
   _syncCodexAutoStartGate(startupGateSnapshot, "startup");
   app.on("second-instance", (_event, commandLine) => {
     if (petWindowRuntime.isPetEffectivelyHidden()) {
+      meetingMode.noteUserOverride("pet-shown");
       prepManualPetVisibility();
       petWindowRuntime.setPetHidden(false);
     } else {
@@ -6344,6 +6499,11 @@ if (!gotTheLock) {
     void _kimiQuotaRuntime.initialize().catch((err) => {
       console.warn("Clawd: Kimi quota startup reconciliation failed:", err && err.message);
     });
+    void _deepseekBalanceRuntime.initialize().catch(() => {
+      console.warn("Clawd: DeepSeek balance startup reconciliation failed");
+    });
+    powerMonitor.on("suspend", () => _deepseekBalanceRuntime.suspend());
+    powerMonitor.on("resume", () => _deepseekBalanceRuntime.resume());
     notifyPrefsAuthorityFailure();
     if (feishuApprovalMigrationNudge) {
       void feishuApprovalMigrationNudge.sync({ allowNotify: true });
@@ -6382,6 +6542,9 @@ if (!gotTheLock) {
     // timeout (system-wake-recovery.js finishWithTimeout), while un-cloaking is
     // a main-process concern that must not depend on renderer health. The two
     // paths coexist; recoverIfCloaked() is a no-op when nothing is cloaked.
+    // #1382: timers may not advance while the machine sleeps.
+    powerMonitor.on("resume", () => meetingMode.checkExpiry());
+    powerMonitor.on("unlock-screen", () => meetingMode.checkExpiry());
     if (isWin) {
       powerMonitor.on("resume", () => petWindowRuntime.recoverIfCloaked());
       powerMonitor.on("unlock-screen", () => petWindowRuntime.recoverIfCloaked());
@@ -6395,6 +6558,7 @@ if (!gotTheLock) {
         isMac,
         app,
         getShowDock: () => showDock,
+        beforeManualShow: () => meetingMode.noteUserOverride("pet-shown"),
         isPetHidden: () => petWindowRuntime.isPetHidden(),
         setPetHidden: (hidden) => petWindowRuntime.setPetHidden(hidden),
       });

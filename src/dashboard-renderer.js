@@ -607,7 +607,13 @@ function formatTokenCount(value) {
 
 function contextUsageText(session) {
   const usage = session && session.contextUsage;
-  if (!usage || !Number.isFinite(Number(usage.used))) return "";
+  if (!usage) return "";
+  if (!Number.isFinite(Number(usage.used))) {
+    // Percent-only usage (token counts unavailable): never claim "0 tokens".
+    return Number.isFinite(Number(usage.percent))
+      ? `${t("dashboardContextUsage")}: ${Math.max(0, Math.min(100, Math.round(Number(usage.percent))))}%`
+      : "";
+  }
   const used = formatTokenCount(usage.used);
   if (Number.isFinite(Number(usage.limit))) {
     const limit = formatTokenCount(usage.limit);
@@ -645,6 +651,7 @@ function quotaSeverityClass(usedPercent) {
 const DEFAULT_QUOTA_STALE_AFTER_MS = 5 * 60 * 1000;
 const PROVIDER_STALE_AFTER_MS = Object.freeze({
   kimiQuota: 7 * 60 * 1000,
+  deepseekQuota: 12 * 60 * 1000,
 });
 
 function quotaStaleAfterMs(providerKey) {
@@ -862,8 +869,17 @@ function formatResetDate(resetAt) {
 function buildQuotaSourceHeader(sourceEntry, providerEntry, baseLabel, providerKey) {
   const parts = [];
   const multiSource = sourceEntry.multiSource === true;
-  if (multiSource) {
-    parts.push(sourceEntry.host || t("dashboardQuotaSourceLocal"));
+  // Extra local Codex subscriptions are labeled even if they are the only
+  // currently reporting source. A lone default source stays compact.
+  const namedLocalCodex = typeof sourceEntry.sourceKey === "string"
+    && sourceEntry.sourceKey.startsWith("codex-profile:");
+  if (multiSource || namedLocalCodex) {
+    let localLabel = t("dashboardQuotaSourceLocal");
+    if (sourceEntry.hasExtraCodexProfile) {
+      if (providerKey === "codexQuota") localLabel = t("dashboardQuotaSectionCodex");
+      if (providerKey === "codexSparkQuota") localLabel = t("dashboardQuotaSectionCodexSpark");
+    }
+    parts.push(sourceEntry.host || localLabel);
   }
   if (baseLabel) parts.push(baseLabel);
   // lastSeenAt (last confirmation), not updatedAt (last value change): a
@@ -878,14 +894,23 @@ function buildQuotaSourceHeader(sourceEntry, providerEntry, baseLabel, providerK
   return parts.length ? parts.join(" · ") : null;
 }
 
-function buildQuotaHalfBar(labelText, bucket, resetStyle, providerKey, ringSlot) {
+// Mirrored in quota-ring-renderer.js; keep money formatting in sync.
+function formatBalanceAmount(amount, currency) {
+  const symbol = currency === "USD" ? "$" : "¥";
+  return symbol + (amount >= 100 ? Math.round(amount).toString() : amount.toFixed(2));
+}
+
+function buildQuotaHalfBar(labelText, bucket, resetStyle, providerKey, ringSlot, presentation = {}) {
   const half = document.createElement("div");
   half.className = "quota-half";
 
   const labelRow = document.createElement("div");
   labelRow.className = "quota-label-row";
   labelRow.appendChild(createText("span", "quota-label", labelText));
-  const percentText = `${bucket.usedPercent}%`;
+  const isBalance = presentation.kind === "balance";
+  const percentText = isBalance
+    ? t("dashboardDeepseekBalanceBaseline").replace("{amount}", formatBalanceAmount(bucket.baseline, bucket.currency))
+    : `${bucket.usedPercent}%`;
   let resetText = "";
   if (Number.isFinite(bucket.resetAt)) {
     resetText = resetStyle === "date"
@@ -908,15 +933,18 @@ function buildQuotaHalfBar(labelText, bucket, resetStyle, providerKey, ringSlot)
   // Orbit coin uses for the same logical window; the sev- class overrides it
   // on warning/hot, again exactly like the coin's fill.
   fill.className = `quota-bar-fill pv-${providerKey} rg-${ringSlot} ${quotaSeverityClass(bucket.usedPercent)}`;
-  fill.style.width = `${Math.max(0, Math.min(100, bucket.usedPercent))}%`;
+  const percent = isBalance ? 100 - bucket.usedPercent : bucket.usedPercent;
+  fill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
   track.appendChild(fill);
   half.appendChild(track);
 
   return half;
 }
 
-function buildQuotaGroupRow(headerText, fiveHourBucket, weeklyBucket, providerKey) {
+function buildQuotaGroupRow(headerText, fiveHourBucket, weeklyBucket, providerKey, presentation = {}) {
   if (!fiveHourBucket && !weeklyBucket) return null;
+  if (presentation.kind === "balance"
+      && !globalThis.ClawdQuotaBalance.isDrawableBalanceBucket(fiveHourBucket)) return null;
   const row = document.createElement("div");
   row.className = "quota-group-row";
   if (headerText) row.appendChild(createText("div", "quota-group-header", headerText));
@@ -924,11 +952,14 @@ function buildQuotaGroupRow(headerText, fiveHourBucket, weeklyBucket, providerKe
   halves.className = "quota-halves";
   if (fiveHourBucket) {
     halves.appendChild(buildQuotaHalfBar(
-      formatQuotaWindowLabel(fiveHourBucket, t("dashboardQuotaFiveHour")),
+      presentation.kind === "balance"
+        ? formatBalanceAmount(fiveHourBucket.amount, fiveHourBucket.currency)
+        : formatQuotaWindowLabel(fiveHourBucket, t("dashboardQuotaFiveHour")),
       fiveHourBucket,
       quotaResetStyle(fiveHourBucket, "countdown"),
       providerKey,
-      "outer"
+      "outer",
+      presentation
     ));
   }
   if (weeklyBucket) {
@@ -994,7 +1025,9 @@ function renderQuotaSummary(snapshot) {
   kimiQuotaRefreshFeedbackEl = null;
 
   const multiSource = accountQuota.length > 1;
-  const sources = accountQuota.map((entry) => ({ ...entry, multiSource }));
+  const hasExtraCodexProfile = accountQuota.some((source) => typeof source.sourceKey === "string"
+    && source.sourceKey.startsWith("codex-profile:"));
+  const sources = accountQuota.map((entry) => ({ ...entry, multiSource, hasExtraCodexProfile }));
 
   const sections = [];
 
@@ -1090,6 +1123,18 @@ function renderQuotaSummary(snapshot) {
   );
   if (kimiSection) sections.push(kimiSection);
 
+  const deepseekRows = sources.map((source) => {
+    const provider = source.deepseekQuota;
+    const balance = provider?.group?.deepseekBalance;
+    if (!balance) return null;
+    return buildQuotaGroupRow(
+      buildQuotaSourceHeader(source, provider, null, "deepseekQuota"),
+      balance, null, "deepseekQuota", { kind: "balance" }
+    );
+  });
+  const deepseekSection = buildQuotaSection("dashboardQuotaSectionDeepseek", deepseekRows);
+  if (deepseekSection) sections.push(deepseekSection);
+
   if (!sections.length) {
     quotaSummaryEl.hidden = true;
     quotaSummaryEl.replaceChildren();
@@ -1145,6 +1190,7 @@ function beginTitleEdit(session) {
     sessionId: session.id,
     rawSessionId: session.rawSessionId || session.id,
     profileId: session.profileId || "local",
+    codexProfileId: session.codexProfileId || null,
     agentId: session.agentId || null,
     host: session.host || null,
     cwd: session.cwd || "",
@@ -1177,6 +1223,7 @@ async function commitTitleEdit() {
       sessionId: edit.sessionId,
       rawSessionId: edit.rawSessionId,
       profileId: edit.profileId,
+      codexProfileId: edit.codexProfileId,
       cwd: edit.cwd,
       alias: edit.draft,
     });
@@ -1259,6 +1306,13 @@ function appendMeta(main, session, now) {
     profileBadge.title = session.claudeConfigDir
       ? `${t("sessionClaudeProfile")}: ${session.claudeConfigDir}`
       : t("sessionClaudeProfile");
+    meta.appendChild(profileBadge);
+  }
+  if (session.codexProfileLabel) {
+    meta.appendChild(document.createTextNode(" · "));
+    const profileBadge = document.createElement("span");
+    profileBadge.className = "source-badge codex-profile-badge";
+    profileBadge.textContent = session.codexProfileLabel;
     meta.appendChild(profileBadge);
   }
   meta.appendChild(document.createTextNode(" · "));
@@ -1459,7 +1513,9 @@ function createCard(session, now) {
     const button = document.createElement("button");
     button.type = "button";
     const focusTargetType = session.focusTarget && session.focusTarget.type;
-    button.textContent = focusTargetType === "codex-app"
+    button.textContent = focusTargetType === "codebuddy-ide"
+      ? t("dashboardOpenCodeBuddy")
+      : focusTargetType === "codex-app"
       ? t("dashboardOpenCodexApp")
       : focusTargetType === "codex-thread"
       ? t("dashboardOpenCodexSession")

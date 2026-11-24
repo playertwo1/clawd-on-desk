@@ -26,7 +26,7 @@ const {
   BACKOFF_SCHEDULE_MS,
   FORWARD_RECOVERY_FAILURE_LIMIT,
 } = require("../src/remote-ssh-runtime");
-const { clearRemoteNodeCache } = require("../src/remote-ssh-node");
+const { clearRemoteNodeCache, getCachedRemoteNodeBin } = require("../src/remote-ssh-node");
 const { createRemoteSshTransportCoordinator } = require("../src/remote-ssh-transport-coordinator");
 
 const DETECT_SSH_OK = () => ({
@@ -2104,6 +2104,97 @@ test("a failed recovery cannot leak forward-conflict retry eligibility into manu
   rt.cleanup();
 });
 
+test("PR #1366 follow-up: a reverse profile never switches to stdio on forward failure", async () => {
+  const children = [];
+  const timers = makeFakeTimers();
+  const rt = createRemoteSshRuntime({
+    platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+    spawn: (_tool, args) => { const child = makeMockChild(); child._args = args; children.push(child); return child; },
+    createProfileIngress: () => makeSecureIngress(),
+    getHookServerPort: () => 45001,
+    createStdioTransport: () => assert.fail("reverse must not create a stdio transport"),
+  });
+  const modes = [];
+  rt.on("tunnel-mode-detected", (event) => modes.push(event));
+  const profile = makeSecureProfile({ detectedRemoteNodeBin: "/usr/bin/node" });
+  rt.connect(profile);
+  await flushAsyncEvents();
+  await exitSsh(children[0], "remote port forwarding failed for listen port 23333");
+  assert.equal(children.length, 1);
+  assert.equal(rt.getProfileStatus(profile.id).status, "failed");
+  assert.equal(rt.getProfileStatus(profile.id).tunnelMode, "reverse");
+  assert.equal(modes.length, 0);
+  rt.cleanup();
+});
+
+test("a persisted SSH stdio mode starts directly without requesting -R", async () => {
+  const children = [];
+  let stdioOptions = null;
+  const spawn = (_command, args) => {
+    const child = makeMockChild();
+    child._args = args;
+    children.push(child);
+    return child;
+  };
+  const profile = makeSecureProfile({
+    tunnelMode: "stdio",
+    detectedRemoteNodeBin: "/usr/bin/node",
+  });
+  const rt = createRemoteSshRuntime({
+    spawn,
+    createProfileIngress: () => makeSecureIngress(),
+    getHookServerPort: () => 23333,
+    createStdioTransport: (options) => {
+      stdioOptions = options;
+      return { close() {}, isReady: () => false, getStatus: () => ({ mode: "stdio" }) };
+    },
+  });
+
+  rt.connect(profile);
+  await flushAsyncEvents();
+  assert.equal(children.length, 1);
+  assert.equal(children[0]._args.includes("-R"), false);
+  assert.match(children[0]._args.at(-1), /remote-ssh-stdio-bridge\.js/);
+  assert.equal(rt.getProfileStatus(profile.id).tunnelMode, "stdio");
+  assert.equal(typeof stdioOptions.onReady, "function");
+  rt.cleanup();
+});
+
+test("SSH stdio bridge reports a remote port conflict instead of retrying blindly", async () => {
+  const children = [];
+  const spawn = (_command, args) => {
+    const child = makeMockChild();
+    child._args = args;
+    children.push(child);
+    return child;
+  };
+  const profile = makeSecureProfile({
+    tunnelMode: "stdio",
+    detectedRemoteNodeBin: "/usr/bin/node",
+  });
+  const rt = createRemoteSshRuntime({
+    spawn,
+    createProfileIngress: () => makeSecureIngress(),
+    getHookServerPort: () => 23333,
+    createStdioTransport: () => ({
+      close() {},
+      isReady: () => false,
+      getStatus: () => ({ mode: "stdio" }),
+    }),
+  });
+
+  rt.connect(profile);
+  await flushAsyncEvents();
+  children[0]._fakeExit(98);
+  await flushAsyncEvents();
+  const status = rt.getProfileStatus(profile.id);
+  assert.equal(status.status, "failed");
+  assert.equal(status.lastErrorReason, "stdio_port_conflict");
+  assert.equal(status.hint, "remoteSshErrStdioPortInUse");
+  assert.match(status.message, /23333/);
+  rt.cleanup();
+});
+
 test("a queued reconnect rechecks deployment readiness after the profile target changes", async () => {
   const children = [];
   const timers = makeFakeTimers();
@@ -2857,4 +2948,375 @@ test("issue #1316: unverified Windows readiness carries the config path through 
   assert.equal(status.lastErrorReason, "probe_remote_hooks_unverified");
   assert.equal(status.hint, "remoteSshErrRemoteHooksUnverified");
   assert.match(status.message, /unverified: C:\\Users\\remote\\.copilot\\hooks\\hooks.json/);
+});
+
+test("PR #1366 follow-up: Connect can switch from stdio back to reverse", async () => {
+  const timers = makeFakeTimers();
+  const children = [];
+  const rt = createRemoteSshRuntime({
+    platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+    getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+    spawn: (_tool, args) => { const child = makeMockChild(); child._args = args; children.push(child); return child; },
+    createStdioTransport: () => ({ close() {} }),
+  });
+  const profile = makeSecureProfile({ tunnelMode: "stdio", detectedRemoteNodeBin: "/usr/bin/node" });
+  rt.connect(profile);
+  await flushAsyncEvents();
+  assert.match(children.at(-1)._args.at(-1), /remote-ssh-stdio-bridge/);
+  rt.disconnect(profile.id);
+  await flushAsyncEvents();
+  rt.connect({ ...profile, tunnelMode: "reverse" });
+  await flushAsyncEvents();
+  assert.equal(rt.getProfileStatus(profile.id).tunnelMode, "reverse");
+  assert.ok(children.at(-1)._args.includes("-R"));
+  rt.cleanup();
+});
+
+for (const { name, refresh, changed } of [
+  { name: "refreshing the profile updates the next bridge launch", refresh: "connected", changed: true },
+  { name: "manual Connect uses a changed profile path", refresh: null, changed: true },
+  { name: "an unchanged profile path preserves the resolved Node", refresh: "connected", changed: false },
+  { name: "refreshing the Node path preserves the pending probe and updates the next launch", refresh: "probing", changed: true },
+]) {
+  test(`PR #1366 follow-up: ${name}`, async (t) => {
+    const timers = makeFakeTimers();
+    const children = [];
+    const resolvedNode = "/opt/resolved/bin/node";
+    let ready;
+    const rt = createRemoteSshRuntime({
+      platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+      getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+      spawn: (_tool, args) => { const child = makeMockChild(); child._args = args; children.push(child); return child; },
+      createStdioTransport: (options) => { ready = options.onReady; return { close() {} }; },
+      resolveRemoteNodeBin: () => ({ ok: true, nodeBin: resolvedNode, source: "test" }),
+    });
+    t.after(() => rt.cleanup());
+    const profile = makeSecureProfile({
+      host: "user@stdio-node-refresh", tunnelMode: "stdio", detectedRemoteNodeBin: "/opt/deployed/bin/node",
+      detectedRemoteNodeVersion: refresh === "probing" ? "v22.0.0" : undefined,
+    });
+    const nextProfile = {
+      ...profile,
+      detectedRemoteNodeBin: changed ? "/opt/updated/bin/node" : profile.detectedRemoteNodeBin,
+    };
+    rt.connect(profile);
+    await flushAsyncEvents();
+    ready();
+    if (refresh === "probing") assert.equal(rt.refreshProfile(nextProfile), true);
+    timers.flushWhere((timer) => timer.ms === 0);
+    assert.equal(children.length, 2, "the running bridge still needs its health probe");
+    await exitSsh(children.at(-1), "", 0);
+    assert.equal(rt.getProfileStatus(profile.id).status, "connected");
+
+    if (refresh === "connected") assert.equal(rt.refreshProfile(nextProfile), true);
+    rt.disconnect(profile.id);
+    rt.connect(nextProfile);
+    await flushAsyncEvents();
+
+    const command = children.at(-1)._args.at(-1);
+    assert.match(command, /remote-ssh-stdio-bridge/);
+    assert.ok(command.includes(changed ? nextProfile.detectedRemoteNodeBin : resolvedNode), command);
+  });
+}
+
+test("PR #1366 follow-up: a bridge launch consumes the changed Node path flag once", async (t) => {
+  const timers = makeFakeTimers();
+  const children = [];
+  const resolvedNode = "/opt/resolved/bin/node";
+  let ready;
+  const rt = createRemoteSshRuntime({
+    platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+    getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+    spawn: (_tool, args) => { const child = makeMockChild(); child._args = args; children.push(child); return child; },
+    createStdioTransport: (options) => { ready = options.onReady; return { close() {} }; },
+    resolveRemoteNodeBin: () => ({ ok: true, nodeBin: resolvedNode, source: "test" }),
+  });
+  t.after(() => rt.cleanup());
+  const profile = makeSecureProfile({
+    host: "user@stdio-node-path-flag", tunnelMode: "stdio", detectedRemoteNodeBin: "/opt/deployed/bin/node",
+  });
+  const updatedProfile = { ...profile, detectedRemoteNodeBin: "/opt/updated/bin/node" };
+  rt.connect(profile);
+  await flushAsyncEvents();
+  rt.disconnect(profile.id);
+
+  rt.connect(updatedProfile);
+  await flushAsyncEvents();
+  const updatedCommand = children.at(-1)._args.at(-1);
+  assert.ok(updatedCommand.startsWith(`'${updatedProfile.detectedRemoteNodeBin}' `), updatedCommand);
+  ready();
+  timers.flushWhere((timer) => timer.ms === 0);
+  await exitSsh(children.at(-1), "", 0);
+  assert.equal(rt.getProfileStatus(profile.id).status, "connected");
+
+  rt.disconnect(profile.id);
+  rt.connect(updatedProfile);
+  await flushAsyncEvents();
+  const nextCommand = children.at(-1)._args.at(-1);
+  assert.ok(nextCommand.startsWith(`'${resolvedNode}' `), nextCommand);
+});
+
+for (const [code, hint] of [
+  [126, "remoteSshProbeNodeNotExec"],
+  [127, "remoteSshProbeNodeMissing"],
+]) {
+  test(`PR #1366 follow-up: pre-ready bridge exit ${code} stops reconnecting`, async (t) => {
+    const timers = makeFakeTimers();
+    const children = [];
+    const rt = createRemoteSshRuntime({
+      platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+      getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+      spawn: () => { const child = makeMockChild(); children.push(child); return child; },
+      createStdioTransport: () => ({ close() {} }),
+    });
+    t.after(() => {
+      rt.cleanup();
+      clearRemoteNodeCache();
+    });
+    const profile = makeSecureProfile({
+      host: `user@stdio-node-exit-${code}`, tunnelMode: "stdio",
+      detectedRemoteNodeBin: "/opt/stale/bin/node", detectedRemoteNodeVersion: "v22.0.0",
+    });
+    assert.equal(getCachedRemoteNodeBin(profile).nodeBin, profile.detectedRemoteNodeBin);
+    rt.connect(profile);
+    await flushAsyncEvents();
+    assert.equal(children.length, 1);
+    await exitSsh(children[0], "", code);
+
+    const status = rt.getProfileStatus(profile.id);
+    assert.equal(status.status, "failed");
+    assert.equal(status.lastErrorReason, "stdio_node_stale");
+    assert.equal(status.hint, hint);
+    assert.match(status.message, /Node path.*Deploy \/ Repair Hooks/);
+    assert.equal(status.nextRetryAt, null);
+    assert.equal(timers.size(), 0);
+    assert.equal(getCachedRemoteNodeBin(profile), null);
+  });
+}
+
+test("PR #1366 follow-up: manual Connect uses the profile path after a pre-ready exit 127", async (t) => {
+  const timers = makeFakeTimers();
+  const children = [];
+  const resolvedNode = "/opt/resolved/bin/node";
+  let ready;
+  const rt = createRemoteSshRuntime({
+    platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+    getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+    spawn: (_tool, args) => { const child = makeMockChild(); child._args = args; children.push(child); return child; },
+    createStdioTransport: (options) => { ready = options.onReady; return { close() {} }; },
+    resolveRemoteNodeBin: () => ({ ok: true, nodeBin: resolvedNode, source: "test" }),
+  });
+  t.after(() => {
+    rt.cleanup();
+    clearRemoteNodeCache();
+  });
+  const profile = makeSecureProfile({
+    host: "user@stdio-node-manual-retry", tunnelMode: "stdio", detectedRemoteNodeBin: "/opt/deployed/bin/node",
+  });
+  rt.connect(profile);
+  await flushAsyncEvents();
+  ready();
+  timers.flushWhere((timer) => timer.ms === 0);
+  await exitSsh(children.at(-1), "", 0);
+  assert.equal(rt.getProfileStatus(profile.id).status, "connected");
+
+  rt.disconnect(profile.id);
+  rt.connect(profile);
+  await flushAsyncEvents();
+  const staleBridge = children.at(-1);
+  assert.ok(staleBridge._args.at(-1).startsWith(`'${resolvedNode}' `));
+  await exitSsh(staleBridge, "", 127);
+  assert.equal(rt.getProfileStatus(profile.id).lastErrorReason, "stdio_node_stale");
+
+  rt.connect(profile);
+  await flushAsyncEvents();
+  const command = children.at(-1)._args.at(-1);
+  assert.match(command, /remote-ssh-stdio-bridge/);
+  assert.ok(command.startsWith(`'${profile.detectedRemoteNodeBin}' `), command);
+});
+
+test("PR #1366 follow-up: a ready bridge still reconnects after exits 126 and 127", async (t) => {
+  for (const code of [126, 127]) {
+    const timers = makeFakeTimers();
+    const children = [];
+    let ready;
+    const rt = createRemoteSshRuntime({
+      platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+      getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+      spawn: (_tool, args) => { const child = makeMockChild(); child._args = args; children.push(child); return child; },
+      createStdioTransport: (options) => { ready = options.onReady; return { close() {} }; },
+    });
+    t.after(() => rt.cleanup());
+    const profile = makeSecureProfile({ tunnelMode: "stdio", detectedRemoteNodeBin: "/usr/bin/node" });
+    rt.connect(profile);
+    await flushAsyncEvents();
+    ready();
+    // Bridge readiness precedes the first successful health probe.
+    assert.equal(rt.getProfileStatus(profile.id).status, "connecting");
+    await exitSsh(children[0], "", code);
+
+    const status = rt.getProfileStatus(profile.id);
+    assert.equal(status.status, "reconnecting", `bridge exit ${code}`);
+    assert.equal(status.lastErrorReason, "unknown", `bridge exit ${code}`);
+    timers.flushWhere((timer) => timer.ms === BACKOFF_SCHEDULE_MS[0]);
+    await flushAsyncEvents();
+    assert.equal(children.length, 2, `bridge exit ${code}`);
+    assert.match(children[1]._args.at(-1), /remote-ssh-stdio-bridge/);
+  }
+});
+
+test("PR #1366 follow-up: a healthy stdio connection retries exit 98 with bounded backoff", async () => {
+  for (const recover of [true, false]) {
+    const timers = makeFakeTimers();
+    const children = [];
+    let ready;
+    const rt = createRemoteSshRuntime({
+      platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+      getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+      spawn: (_tool, args) => { const child = makeMockChild(); child._args = args; children.push(child); return child; },
+      createStdioTransport: (options) => { ready = options.onReady; return { close() {} }; },
+    });
+    const profile = makeSecureProfile({ tunnelMode: "stdio", detectedRemoteNodeBin: "/usr/bin/node" });
+    rt.connect(profile);
+    await flushAsyncEvents();
+    const tunnel = children.at(-1);
+    ready();
+    timers.flushWhere((timer) => timer.ms === 0);
+    await exitSsh(children.at(-1), "", 0);
+    assert.equal(rt.getProfileStatus(profile.id).status, "connected");
+    await exitSsh(tunnel, "Connection reset by peer");
+    for (let attempt = 0; attempt < (recover ? 3 : 4); attempt += 1) {
+      timers.flushWhere((timer) => timer.ms === BACKOFF_SCHEDULE_MS[attempt]);
+      await flushAsyncEvents();
+      if (recover && attempt === 2) {
+        ready();
+        timers.flushWhere((timer) => timer.ms === 0);
+        await exitSsh(children.at(-1), "", 0);
+        assert.equal(rt.getProfileStatus(profile.id).status, "connected");
+      } else {
+        await exitSsh(children.at(-1), "EADDRINUSE", 98);
+        assert.equal(rt.getProfileStatus(profile.id).status, attempt === 3 ? "failed" : "reconnecting");
+      }
+    }
+    rt.cleanup();
+  }
+});
+
+test("PR #1366 follow-up: reverse startup does not load multiplex", () => {
+  const childProcess = require("node:child_process");
+  const result = childProcess.spawnSync(process.execPath, ["-e", `
+    const Module = require("module");
+    const load = Module._load;
+    Module._load = function(name, ...args) {
+      if (name === "multiplex") throw new Error("reverse loaded multiplex");
+      return load.call(this, name, ...args);
+    };
+    const { createRemoteSshRuntime } = require(${JSON.stringify(require.resolve("../src/remote-ssh-runtime"))});
+    const assert = require("node:assert/strict");
+    const { EventEmitter } = require("node:events");
+    ${makeMockChild.toString()}
+    ${makeFakeTimers.toString()}
+    ${makeSecureProfile.toString()}
+    ${makeSecureIngress.toString()}
+    ${flushAsyncEvents.toString()}
+    ${connectSecureProfile.toString()}
+    (async () => {
+      const timers = makeFakeTimers();
+      const children = [];
+      const rt = createRemoteSshRuntime({
+        platform: "linux", getHookServerPort: () => 45001,
+        detectSsh: () => ({ available: true, version: "OpenSSH_9.5p2" }),
+        resolveRemoteNodeBin: () => ({ ok: true, nodeBin: "/usr/bin/node", version: "v20.0.0" }),
+        setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+        createProfileIngress: () => makeSecureIngress(),
+        spawn: (_tool, args) => { const child = makeMockChild(); child.args = args; children.push(child); return child; },
+      });
+      try {
+        await connectSecureProfile(rt, timers, children, makeSecureProfile({ tunnelMode: "reverse" }));
+        assert.ok(children[0].args.includes("-R"));
+        assert.equal(children.length, 2, "reverse tunnel and health probe must both run");
+        assert.equal(require.cache[require.resolve("multiplex")], undefined);
+      } finally {
+        rt.cleanup();
+      }
+    })().catch((error) => { console.error(error); process.exitCode = 1; });
+  `], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("PR #1366 follow-up: Node stamps include the mode and every deployment field", async () => {
+  const { deployTargetFingerprint } = require("../src/remote-ssh-profile");
+  const { commandRegistry } = require("../src/settings-actions");
+  const timers = makeFakeTimers();
+  const profile = makeSecureProfile({ tunnelMode: "stdio", chainStatusline: true, detectedRemoteNodeBin: "/usr/bin/node", host: "user@node-stamp-test" });
+  const children = [];
+  let ready;
+  const stamps = [];
+  const rt = createRemoteSshRuntime({
+    platform: "linux", setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+    getHookServerPort: () => 45001, createProfileIngress: () => makeSecureIngress(),
+    spawn: () => { const child = makeMockChild(); children.push(child); return child; },
+    createStdioTransport: (options) => { ready = options.onReady; return { close() {} }; },
+    resolveRemoteNodeBin: async () => ({ ok: true, nodeBin: "/usr/bin/node", version: "v22.1.0", source: "path" }),
+  });
+  rt.on("remote-node-detected", (stamp) => stamps.push(stamp));
+  rt.connect(profile);
+  await flushAsyncEvents();
+  ready();
+  timers.flushWhere((timer) => timer.ms === 0);
+  await exitSsh(children.at(-1), "", 0);
+  assert.equal(stamps.length, 1);
+  assert.deepEqual(stamps[0].expectedTarget, deployTargetFingerprint(profile));
+  const result = commandRegistry["remoteSsh.markRemoteNode"](stamps[0], { snapshot: { remoteSsh: { profiles: [profile] } } });
+  assert.equal(result.status, "ok");
+  assert.notEqual(result.reason, "target_drift");
+  assert.equal(result.commit.remoteSsh.profiles[0].detectedRemoteNodeBin, "/usr/bin/node");
+  rt.cleanup();
+});
+
+test("PR #1366 follow-up: final forward failure retains port advice before gateway guidance", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const vm = require("node:vm");
+  const context = {};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/settings-i18n.js"), "utf8"), context);
+  const children = [];
+  const timers = makeFakeTimers();
+  const rt = createRemoteSshRuntime({
+    platform: "linux", getHookServerPort: () => 45001,
+    createProfileIngress: () => makeSecureIngress(),
+    setTimeout: timers.setTimeoutFn, clearTimeout: timers.clearTimeoutFn,
+    spawn: () => { const child = makeMockChild(); children.push(child); return child; },
+  });
+  try {
+    const profile = makeSecureProfile({ tunnelMode: "reverse" });
+    rt.connect(profile);
+    await flushAsyncEvents();
+    await exitSsh(children[0], "remote port forwarding failed for listen port 23333");
+    const failure = rt.getProfileStatus(profile.id);
+    assert.equal(failure.status, "failed");
+    assert.equal(failure.hint, "remoteSshErrForwardFailed");
+    const visibleHint = context.ClawdSettingsI18n.STRINGS.en[failure.hint];
+    assert.match(visibleHint, /^Remote port unavailable\. Try again later\./);
+    assert.match(visibleHint, /run Deploy \/ Repair Hooks before connecting\./);
+    assert.ok(visibleHint.endsWith(context.ClawdSettingsI18n.STRINGS.en.remoteSshGatewayHelp));
+  } finally {
+    rt.cleanup();
+  }
+});
+
+test("PR #1366 follow-up: gateway guidance excludes authentication and network failures in both discovery stages", () => {
+  const { shouldSuggestGatewayMode } = require("../src/remote-ssh-runtime");
+  const excluded = [
+    "Permission denied (publickey)", "Host key verification failed", "Identity file /missing not accessible",
+    "Could not resolve hostname", "Connection timed out", "Network is unreachable", "Broken pipe", "Operation timed out",
+  ];
+  for (const step of ["check-node", "remote-shell"]) {
+    assert.equal(shouldSuggestGatewayMode({ tunnelMode: "reverse" }, step, "gateway rejects multiline commands"), true, step);
+    assert.equal(shouldSuggestGatewayMode({ tunnelMode: "stdio" }, step, "gateway rejects multiline commands"), false, step);
+    for (const stderr of excluded) {
+      assert.equal(shouldSuggestGatewayMode({ tunnelMode: "reverse" }, step, stderr), false, `${step}: ${stderr}`);
+    }
+  }
+  assert.equal(shouldSuggestGatewayMode({}, "layout", "gateway rejects multiline commands"), false);
 });

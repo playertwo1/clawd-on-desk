@@ -14,7 +14,7 @@ const _cloudlingTheme = themeLoader.loadTheme("cloudling");
 const { createTranslator } = require("../src/i18n");
 const { makeSessionKey, resolveSessionIdentity } = require("../src/session-key");
 const { isSessionInProgress, sessionSnapshotSignature } = require("../src/state-session-snapshot");
-const { isFocusableLocalHudSession } = require("../src/session-focus");
+const { getSessionFocusTarget, isFocusableLocalHudSession } = require("../src/session-focus");
 const { countLiveSubagents } = require("../src/state-visual-resolver");
 const { resolveIdleVisualChoice } = require("../src/idle-visual");
 
@@ -69,6 +69,72 @@ function makePidKill(alivePids) {
 function cloneTheme(theme) {
   return JSON.parse(JSON.stringify(theme));
 }
+
+describe("PR #1386 follow-up: CodeBuddy IDE session metadata", () => {
+  let api;
+  beforeEach(() => { api = require("../src/state")(makeCtx()); });
+  afterEach(() => api.cleanup());
+
+  it("PR #1386 follow-up: keeps the first prompt title and the IDE client across later events", () => {
+    api.updateSession("codebuddy:s1", "thinking", "UserPromptSubmit", {
+      agentId: "codebuddy", sourcePid: 12089, cwd: "/tmp/project",
+      codebuddyClient: "CodeBuddyIDE",
+      sessionTitle: "分辨率分别是？", sessionTitleFromPrompt: true,
+    });
+    api.updateSession("codebuddy:s1", "thinking", "UserPromptSubmit", {
+      agentId: "codebuddy", sourcePid: 12089, cwd: "/tmp/project",
+      sessionTitle: "第二个标题", sessionTitleFromPrompt: true,
+    });
+    api.updateSession("codebuddy:s1", "working", "PreToolUse", {
+      agentId: "codebuddy", sourcePid: 12089, cwd: "/tmp/project",
+    });
+    const session = api.sessions.get("codebuddy:s1");
+    assert.strictEqual(session.sessionTitle, "分辨率分别是？");
+    assert.strictEqual(session.sessionTitleFromPrompt, true);
+    assert.strictEqual(session.codebuddyClient, "CodeBuddyIDE");
+  });
+
+  it("PR #1407 follow-up: keeps a CodeBuddy IDE row after the harness exits and refreshes identity later", () => {
+    const alivePids = new Set([71001]);
+    const localApi = require("../src/state")(makeCtx({
+      processKill: makePidKill(alivePids),
+    }));
+    try {
+      localApi.updateSession("codebuddy:s2", "working", "PreToolUse", {
+        agentId: "codebuddy", codebuddyClient: "CodeBuddyIDE",
+        sourcePid: 71001, agentPid: 71002, pidChain: [71003, 71002],
+        cwd: "/tmp/project",
+      });
+      localApi.cleanStaleSessions();
+      assert.ok(localApi.sessions.has("codebuddy:s2"), "a live IDE source must keep the row");
+
+      localApi.updateSession("codebuddy:s2", "thinking", "UserPromptSubmit", {
+        agentId: "codebuddy", codebuddyClient: "CodeBuddyIDE", cwd: "/tmp/project",
+        sessionTitle: "next turn", sessionTitleFromPrompt: true,
+      });
+      let session = localApi.sessions.get("codebuddy:s2");
+      assert.strictEqual(session.sourcePid, 71001);
+      assert.deepStrictEqual(
+        getSessionFocusTarget({ ...session, id: "codebuddy:s2" }, { osPlatform: "win32" }),
+        { canFocus: true, type: "codebuddy-ide", url: null }
+      );
+
+      alivePids.add(71004);
+      alivePids.add(71005);
+      alivePids.add(71006);
+      localApi.updateSession("codebuddy:s2", "working", "PreToolUse", {
+        agentId: "codebuddy", codebuddyClient: "CodeBuddyIDE",
+        sourcePid: 71006, agentPid: 71004, pidChain: [71005, 71004], cwd: "/tmp/project",
+      });
+      session = localApi.sessions.get("codebuddy:s2");
+      assert.strictEqual(session.sourcePid, 71006);
+      assert.strictEqual(session.agentPid, 71004);
+      assert.deepStrictEqual(session.pidChain, [71005, 71004]);
+    } finally {
+      localApi.cleanup();
+    }
+  });
+});
 
 describe("Claude correlated batch phase", () => {
   let api;
@@ -3047,6 +3113,65 @@ describe("updateSession()", () => {
     assert.strictEqual(api.sessions.get("c1").pidReachable, true);
   });
 
+  it("stores and preserves labels for additional local Codex profiles only", () => {
+    api.updateSession("company-session", "working", "UserPromptSubmit", {
+      agentId: "codex",
+      profileId: "local",
+      rawSessionId: "codex:shared",
+      codexProfileId: "company",
+      codexProfileLabel: "Company",
+    });
+    const company = api.sessions.get("company-session");
+    assert.equal(company.codexProfileId, "company");
+    assert.equal(company.codexProfileLabel, "Company");
+
+    api.updateSession("company-session", "working", "PreToolUse", {
+      agentId: "codex",
+      profileId: "local",
+      rawSessionId: "codex:shared",
+    });
+    assert.equal(company.codexProfileId, "company");
+    assert.equal(company.codexProfileLabel, "Company");
+
+    api.updateSession("claude-session", "working", "PreToolUse", {
+      agentId: "claude-code",
+      profileId: "local",
+      codexProfileId: "company",
+      codexProfileLabel: "Company",
+    });
+    assert.equal(api.sessions.get("claude-session").codexProfileId, undefined);
+  });
+
+  it("passes distinct ephemeral recap identities for identical Codex tool calls across local profiles", () => {
+    const { createMemoryRecapSink } = require("../src/recap-sink");
+    const recapSink = createMemoryRecapSink({ captureEphemeralIdentity: true });
+    api.cleanup();
+    ctx = makeCtx({ recapSink });
+    api = require("../src/state")(ctx);
+    const rawSessionId = "codex:shared-recap-id";
+    const defaultSessionKey = makeSessionKey({ profileId: "local", rawSessionId });
+    const companySessionKey = makeSessionKey({
+      profileId: "local", rawSessionId: "codex-profile:company:" + rawSessionId,
+    });
+    for (const [sessionId, extra] of [
+      [defaultSessionKey, {}],
+      [companySessionKey, { codexProfileId: "company", codexProfileLabel: "Company" }],
+    ]) {
+      api.updateSession(sessionId, "working", "PreToolUse", {
+        agentId: "codex",
+        profileId: "local",
+        rawSessionId,
+        toolUseId: "reused-tool-call",
+        ...extra,
+      });
+    }
+    const identities = recapSink.identitySnapshot().filter((entry) =>
+      entry.dedupeId === "tool-call:reused-tool-call");
+    assert.equal(identities.length, 2);
+    assert.deepStrictEqual(identities.map((entry) => entry.scopeId), ["local", "codex-profile:company"]);
+    assert.deepStrictEqual(identities.map((entry) => entry.sessionId), [rawSessionId, rawSessionId]);
+  });
+
   it("attention is oneshot — stored as idle in session", () => {
     update(api, { id: "s1", state: "working" });
     mock.timers.tick(1000); // past MIN_DISPLAY_MS.working
@@ -3998,6 +4123,33 @@ describe("updateSession()", () => {
     assert.strictEqual(reloaded.find((entry) => entry.host === "workbox").claudeQuota.group.claudeWeekly.usedPercent, 90);
   });
 
+  it("persists and broadcasts DeepSeek amount changes and clears a disabled startup cache", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-deepseek-state-"));
+    const persistPath = path.join(dir, "account-quota.json");
+    const broadcasts = [];
+    const localApi = require("../src/state")(makeCtx({ accountQuotaPersistPath: persistPath,
+      deepseekBalanceCollectionEnabled: true,
+      broadcastSessionSnapshot: (snapshot) => broadcasts.push(snapshot) }));
+    try {
+      const capturedAt = Date.now();
+      const make = (amount) => ({ deepseekBalance: { usedPercent: 55, amount, baseline: 100,
+        currency: "CNY", capturedAt } });
+      assert.deepStrictEqual(localApi.commitLocalDeepseekQuota(make(45.20)), { accepted: true, persisted: true });
+      const before = broadcasts.length;
+      localApi.commitLocalDeepseekQuota(make(45.21));
+      assert.strictEqual(broadcasts.length, before + 1);
+      assert.strictEqual(localApi.buildSessionSnapshot().accountQuota[0].deepseekQuota.group.deepseekBalance.amount,
+        45.21);
+    } finally { localApi.cleanup(); }
+    const restarted = require("../src/state")(makeCtx({ accountQuotaPersistPath: persistPath,
+      deepseekBalanceCollectionEnabled: false }));
+    try { assert.strictEqual(restarted.buildSessionSnapshot().accountQuota.length, 0); }
+    finally { restarted.cleanup(); }
+    const reloaded = require("../src/state-account-quota").createAccountQuotaStore({ persistPath });
+    assert.strictEqual(reloaded.snapshot().length, 0);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("commits, flushes, and clears only local Kimi quota", () => {
     const persistPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "clawd-kimi-state-")), "account-quota.json");
     const localApi = require("../src/state")(makeCtx({
@@ -4914,7 +5066,7 @@ describe("buildSessionSnapshot", () => {
     // shape, then compare the rest exactly.
     const { quotaAgentIcons, ...rest } = snapshot;
     assert.deepStrictEqual(Object.keys(quotaAgentIcons).sort(), [
-      "antigravityQuota", "claudeQuota", "codexQuota", "kimiQuota",
+      "antigravityQuota", "claudeQuota", "codexQuota", "deepseekQuota", "kimiQuota",
     ]);
     assert.deepStrictEqual(rest, {
       sessions: [],
@@ -7669,10 +7821,30 @@ describe("antigravity trailing PostToolUse filter", () => {
 // Desktop apps can reopen a previous conversation on launch, so their
 // SessionStart only means "opened", not "used". Clawd keeps that row out of the
 // HUD until the user does something, while the Dashboard keeps listing and
-// opening it. DSH and Kimi Code both behave this way.
+// opening it. DSH and Kimi Code both behave this way. Copilot (the CLI, or the
+// runtime inside VS Code) also sends a sessionStart when a conversation is
+// opened or restored, before the user has acted.
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe("reopened conversation stays out of the HUD until activity", () => {
+  // DSH and Kimi post the PascalCase spellings; Copilot posts the camelCase hook
+  // names from its hooks.json verbatim, so the state machine must recognize both.
+  const PASCAL_EVENTS = {
+    start: "SessionStart",
+    prompt: "UserPromptSubmit",
+    preTool: "PreToolUse",
+    postTool: "PostToolUse",
+    stop: "Stop",
+    end: "SessionEnd",
+  };
+  const COPILOT_EVENTS = {
+    start: "sessionStart",
+    prompt: "userPromptSubmitted",
+    preTool: "preToolUse",
+    postTool: "postToolUse",
+    stop: "agentStop",
+    end: "sessionEnd",
+  };
   const CASES = [
     {
       label: "DSH",
@@ -7681,6 +7853,7 @@ describe("reopened conversation stays out of the HUD until activity", () => {
       ghostId: "deepseek-harness:ghost",
       extra: { dshCarrier: "desktop" },
       focusTarget: { type: "dsh-desktop", url: "dsh://open" },
+      events: PASCAL_EVENTS,
     },
     {
       label: "Kimi Code",
@@ -7689,7 +7862,26 @@ describe("reopened conversation stays out of the HUD until activity", () => {
       ghostId: "kimi-cli:ghost",
       extra: { sourcePid: 4242 },
       focusTarget: { type: "terminal", url: null },
+      events: PASCAL_EVENTS,
     },
+    {
+      label: "Copilot",
+      agentId: "copilot-cli",
+      sessionId: "copilot-cli:conversation",
+      ghostId: "copilot-cli:ghost",
+      extra: { sourcePid: 4242 },
+      focusTarget: { type: "terminal", url: null },
+      events: COPILOT_EVENTS,
+    },
+  ];
+  // Each action clears the marker on its own, so every case starts from a session
+  // that only received the start event.
+  const ACTIVITY_EVENTS = [
+    { label: "a user prompt", state: "thinking", event: (events) => events.prompt },
+    { label: "a tool call", state: "working", event: (events) => events.preTool },
+    { label: "a finished tool call", state: "working", event: (events) => events.postTool },
+    { label: "a stop", state: "attention", event: (events) => events.stop },
+    { label: "a notification", state: "notification", event: () => "Notification" },
   ];
 
   for (const testCase of CASES) {
@@ -7709,11 +7901,32 @@ describe("reopened conversation stays out of the HUD until activity", () => {
         update(api, {
           id: testCase.sessionId,
           state: "idle",
-          event: "SessionStart",
+          event: testCase.events.start,
           agentId: testCase.agentId,
           rawSessionId: "conversation",
           ...testCase.extra,
           ...overrides,
+        });
+      }
+
+      function startOn(targetApi) {
+        update(targetApi, {
+          id: testCase.sessionId,
+          state: "idle",
+          event: testCase.events.start,
+          agentId: testCase.agentId,
+          rawSessionId: "conversation",
+          ...testCase.extra,
+        });
+      }
+
+      function actOn(targetApi) {
+        update(targetApi, {
+          id: testCase.sessionId,
+          state: "working",
+          event: testCase.events.preTool,
+          agentId: testCase.agentId,
+          ...testCase.extra,
         });
       }
 
@@ -7745,7 +7958,7 @@ describe("reopened conversation stays out of the HUD until activity", () => {
         update(api, {
           id: testCase.sessionId,
           state: "thinking",
-          event: "UserPromptSubmit",
+          event: testCase.events.prompt,
           agentId: testCase.agentId,
           ...testCase.extra,
         });
@@ -7786,7 +7999,7 @@ describe("reopened conversation stays out of the HUD until activity", () => {
           update(localApi, {
             id: testCase.sessionId,
             state: "idle",
-            event: "SessionStart",
+            event: testCase.events.start,
             agentId: testCase.agentId,
             rawSessionId: "conversation",
             ...testCase.extra,
@@ -7834,7 +8047,7 @@ describe("reopened conversation stays out of the HUD until activity", () => {
         update(api, {
           id: testCase.sessionId,
           state: "thinking",
-          event: "UserPromptSubmit",
+          event: testCase.events.prompt,
           agentId: testCase.agentId,
           ...testCase.extra,
         });
@@ -7845,6 +8058,130 @@ describe("reopened conversation stays out of the HUD until activity", () => {
         assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, true);
         assert.strictEqual(snapshotEntry(api.buildSessionSnapshot()).hiddenFromHud, true);
       });
+
+      for (const activity of ACTIVITY_EVENTS) {
+        it(`reveals the conversation after ${activity.label}`, () => {
+          sessionStart();
+          assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, true);
+
+          update(api, {
+            id: testCase.sessionId,
+            state: activity.state,
+            event: activity.event(testCase.events),
+            agentId: testCase.agentId,
+            ...testCase.extra,
+          });
+
+          assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, false);
+          assert.strictEqual(snapshotEntry(api.buildSessionSnapshot()).hiddenFromHud, false);
+        });
+      }
+
+      it("keeps the conversation visible when a repeated start arrives during a live approval", () => {
+        const pending = [];
+        const localApi = require("../src/state")(makeCtx({ pendingPermissions: pending }));
+        try {
+          startOn(localApi);
+          actOn(localApi);
+          assert.strictEqual(localApi.sessions.get(testCase.sessionId).awaitingActivity, false);
+
+          pending.push({
+            sessionId: testCase.sessionId,
+            agentId: testCase.agentId,
+            res: { destroyed: false, writableEnded: false },
+          });
+          startOn(localApi);
+
+          assert.strictEqual(localApi.sessions.get(testCase.sessionId).awaitingActivity, false);
+          const entry = localApi.buildSessionSnapshot().sessions.find((s) => s.id === testCase.sessionId);
+          assert.strictEqual(entry.hiddenFromHud, false);
+        } finally {
+          localApi.cleanup();
+        }
+      });
+
+      it("re-marks the conversation when the approval connection has already ended", () => {
+        const localApi = require("../src/state")(makeCtx({
+          pendingPermissions: [{
+            sessionId: testCase.sessionId,
+            agentId: testCase.agentId,
+            res: { writableEnded: true },
+          }],
+        }));
+        try {
+          startOn(localApi);
+          actOn(localApi);
+
+          startOn(localApi);
+
+          assert.strictEqual(localApi.sessions.get(testCase.sessionId).awaitingActivity, true);
+          const entry = localApi.buildSessionSnapshot().sessions.find((s) => s.id === testCase.sessionId);
+          assert.strictEqual(entry.hiddenFromHud, true);
+        } finally {
+          localApi.cleanup();
+        }
+      });
+
+      it("re-marks the conversation when the live approval belongs to another session or agent", () => {
+        for (const pendingApproval of [
+          { sessionId: `${testCase.sessionId}-other`, agentId: testCase.agentId },
+          { sessionId: testCase.sessionId, agentId: "claude-code" },
+        ]) {
+          const localApi = require("../src/state")(makeCtx({
+            pendingPermissions: [{ ...pendingApproval, res: {} }],
+          }));
+          try {
+            startOn(localApi);
+            actOn(localApi);
+
+            startOn(localApi);
+
+            assert.strictEqual(localApi.sessions.get(testCase.sessionId).awaitingActivity, true);
+          } finally {
+            localApi.cleanup();
+          }
+        }
+      });
+
+      if (testCase.events.end === "sessionEnd") {
+        it("deletes an untouched conversation when its session ends", () => {
+          sessionStart();
+          assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, true);
+
+          update(api, {
+            id: testCase.sessionId,
+            state: "sleeping",
+            event: testCase.events.end,
+            agentId: testCase.agentId,
+            ...testCase.extra,
+          });
+
+          assert.strictEqual(api.sessions.has(testCase.sessionId), false);
+          assert.strictEqual(snapshotEntry(api.buildSessionSnapshot()), undefined);
+        });
+
+        it("deletes a used conversation when its session ends", () => {
+          sessionStart();
+          update(api, {
+            id: testCase.sessionId,
+            state: "thinking",
+            event: testCase.events.prompt,
+            agentId: testCase.agentId,
+            ...testCase.extra,
+          });
+          assert.strictEqual(api.sessions.get(testCase.sessionId).awaitingActivity, false);
+
+          update(api, {
+            id: testCase.sessionId,
+            state: "sleeping",
+            event: testCase.events.end,
+            agentId: testCase.agentId,
+            ...testCase.extra,
+          });
+
+          assert.strictEqual(api.sessions.has(testCase.sessionId), false);
+        });
+      }
     });
   }
 
@@ -7879,6 +8216,84 @@ describe("reopened conversation stays out of the HUD until activity", () => {
       mock.timers.reset();
     }
   });
+});
+
+describe("Copilot session end deletes the row", () => {
+  let api;
+  beforeEach(() => {
+    mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+    // Keep the reported PIDs alive so only the end event can remove the row.
+    api = require("../src/state")(makeCtx({ processKill: () => true }));
+  });
+  afterEach(() => {
+    api.cleanup();
+    mock.timers.reset();
+  });
+
+  function copilotEvent(id, state, event, overrides = {}) {
+    update(api, {
+      id,
+      state,
+      event,
+      agentId: "copilot-cli",
+      sourcePid: 4242,
+      agentPid: 4242,
+      ...overrides,
+    });
+  }
+
+  const STATES = [
+    { label: "an untouched session", setup: () => {} },
+    { label: "an idle session", setup: (id) => copilotEvent(id, "attention", "agentStop") },
+    { label: "a working session", setup: (id) => copilotEvent(id, "working", "preToolUse") },
+  ];
+
+  for (const entry of STATES) {
+    it(`deletes ${entry.label} when its session ends`, () => {
+      const id = "copilot-ended";
+      copilotEvent(id, "idle", "sessionStart");
+      entry.setup(id);
+      assert.ok(api.sessions.has(id), "the session is live before the end event");
+
+      copilotEvent(id, "sleeping", "sessionEnd");
+
+      assert.strictEqual(api.sessions.has(id), false);
+      assert.strictEqual(
+        api.buildSessionSnapshot().sessions.some((sessionEntry) => sessionEntry.id === id),
+        false
+      );
+    });
+  }
+
+  it("ends only the matching child for a subagent-scoped lowercase sessionEnd", () => {
+    const id = "copilot-parent";
+    copilotEvent(id, "working", "preToolUse");
+    copilotEvent(id, "juggling", "subagentStart", { subagentId: "child-a", subagentLifecycleSource: "native" });
+    copilotEvent(id, "juggling", "subagentStart", { subagentId: "child-b", subagentLifecycleSource: "native" });
+
+    copilotEvent(id, "sleeping", "sessionEnd", { subagentId: "child-a", subagentLifecycleSource: "native" });
+
+    assert.ok(api.sessions.has(id), "a child end must keep the parent row");
+    assert.deepStrictEqual(
+      [...api.sessions.get(id).subagentTracker.confirmedIds],
+      ["child-b"]
+    );
+  });
+
+  for (const endEvent of ["sessionEnd", "SessionEnd"]) {
+    it(`does not evict a live session when an unknown id ends with ${endEvent}`, () => {
+      for (let i = 0; i < 20; i++) {
+        copilotEvent(`keep-${i}`, "working", "preToolUse", { sourcePid: 5000 + i, agentPid: 5000 + i });
+      }
+      assert.strictEqual(api.sessions.size, 20);
+
+      copilotEvent("never-seen", "sleeping", endEvent);
+
+      assert.strictEqual(api.sessions.size, 20);
+      for (let i = 0; i < 20; i++) assert.ok(api.sessions.has(`keep-${i}`));
+      assert.strictEqual(api.sessions.has("never-seen"), false);
+    });
+  }
 });
 
 describe("Claude profile folder on sessions (#1250)", () => {
