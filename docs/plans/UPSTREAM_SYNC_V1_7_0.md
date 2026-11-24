@@ -38,14 +38,14 @@ Trazer para o fork `playertwo1/clawd-on-desk` o que saiu no original `rullerzhou
 ## 6. Etapas
 | # | Etapa | Responsável | Aceite |
 |---|---|---|---|
-| S0 | Adicionar remoto `upstream`, fetch, congelar o SHA do `upstream/main` usado e o SHA da `main` do fork | Leão Marinho | SHAs registrados no PR |
-| S1 | Baseline: rodar a suíte na `main` do fork e no `upstream/main` (anotar falhas já existentes) | Leão Marinho | tabela de baseline |
-| S2 | Merge na branch `sync/upstream-v1.7.0`, resolver os 13 conflitos possíveis | Leão Marinho | merge commit sem marcadores, `git diff` revisado arquivo a arquivo |
-| S3 | Testes dos cartões do fork e do updater continuam passando; novo teste cobrindo cartão + novas regras do Codex (perfis, subagente) | Leão Marinho | testes novos verdes |
-| S4 | Suíte completa (`npm test` e o que `CONTRIBUTING.md`/CI mandar), lint, build do instalador no Windows | Leão Marinho | verde, ou falhas iguais ao baseline |
-| S5 | QA manual no Windows: pet abre, HUD, foco no Claude Desktop (1 e 2 instâncias), cartões de fim de turno (Codex/Antigravity), modo reunião, perfis Codex, updater aponta para o fork | Leão Marinho (evidência) e dono (olhar final) | capturas/vídeo curto, checklist preenchida |
-| S6 | Auditoria independente: nada do fork perdido (comparar os 16 commits), sem dado pessoal/segredo, licenças/NOTICE do original mantidas, updater não aponta para o original por engano | Golfinho | PASS |
-| S7 | Versão 1.7.1, CHANGELOG/notas, release | Tartaruga, **só com o sim do dono** | Release publicada, SHA-256 do instalador conferido |
+| S0 | Adicionar remoto `upstream`, fetch, congelar o SHA do `upstream/main` usado e o SHA da `main` do fork | Tubarão | SHAs registrados no PR |
+| S1 | Baseline: rodar a suíte na `main` do fork e no `upstream/main` (anotar falhas já existentes) | Tubarão | tabela de baseline |
+| S2 | Merge na branch `sync/upstream-v1.7.0`, resolver os 13 conflitos possíveis | Tubarão | merge commit sem marcadores, `git diff` revisado arquivo a arquivo |
+| S3 | Testes dos cartões do fork e do updater continuam passando; novo teste cobrindo cartão + novas regras do Codex (perfis, subagente) | Tubarão | testes novos verdes |
+| S4 | Suíte completa (`npm test` e o que `CONTRIBUTING.md`/CI mandar), lint, build do instalador no Windows | Tubarão | verde, ou falhas iguais ao baseline |
+| S5 | QA no Windows: pet abre, HUD, foco no Claude Desktop (1 e 2 instâncias), cartões de fim de turno (Codex/Antigravity), modo reunião, perfis Codex, updater aponta para o fork; checklist com capturas | Golfinho | checklist completa com evidência |
+| S6 | Auditoria independente: nada do fork perdido (comparar os 16 commits), sem dado pessoal/segredo, licenças/NOTICE do original mantidas, updater não aponta para o original por engano. S5 e S6 podem ser um único veredito | Golfinho | PASS |
+| S7 | Versão 1.7.1, CHANGELOG, **atualizar os README** (versão, novidades do original incorporadas, fork/updater), merge do PR e release com instalador e SHA-256 | Tartaruga | Release publicada, README atualizado, SHA-256 conferido. **Autorizado pelo dono condicionado ao PASS do Golfinho em S5/S6** |
 
 ## 7. Riscos
 | Risco | Efeito | Mitigação |
@@ -63,6 +63,7 @@ Funcionalidades novas do fork, mudar a licença/NOTICE, traduções, backport pa
 - Contribuir os cartões do fork de volta ao original, ou manter só no fork?
 - Manter o nome de versão `1.7.1` ou alinhar ao original e usar sufixo (ex.: `1.7.0-fork.1`)?
 - Plataformas do QA: só Windows (assumido) ou também macOS/Linux?
+- Decididas em 2026-11-24 pelo dono: o QA é do Golfinho (não do dono); com PASS, a Tartaruga publica a release e atualiza o README sem novo pedido.
 
 ## 10. Como retomar
-Entregar este plano ao Leão Marinho como handoff a partir de S0; o Golfinho audita em S6; a Tartaruga só publica com o sim do dono.
+Tubarão executa S0 a S4; Golfinho faz o QA e a auditoria (S5/S6); com PASS, a Tartaruga executa S7.
