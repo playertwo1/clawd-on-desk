@@ -16,7 +16,7 @@ const {
 } = require("../src/session-focus-handoff");
 const { discoverDshDesktopSync } = require("../hooks/dsh-install");
 const { makeSessionKey } = require("../src/session-key");
-const { getSessionFocusTarget, mergeSessionFocusEntry } = require("../src/session-focus");
+const { getSessionFocusTarget, getSessionFocusWtHwnd, getTerminalFocusSourcePid, mergeSessionFocusEntry } = require("../src/session-focus");
 const { buildPermissionFocusEntry } = require("../src/permission").__test;
 
 const DSH_PLIST = [
@@ -287,6 +287,61 @@ describe("session focus handoff", () => {
     assert.strictEqual(pending.length, 1);
     await Promise.all(pending);
     assert.deepStrictEqual(calls, [["publish", "session-approval"], ["open", "dsh://open"]]);
+  });
+
+  it("PR #1196 follow-up: main blocks Codex focus from an extra profile's pending card alone", () => {
+    const main = fs.readFileSync(path.join(__dirname, "../src/main.js"), "utf8");
+    const pendingFocus = main.match(/^function getPendingPermissionFocusEntry\([\s\S]*?^}/m);
+    const dashboardFocus = main.match(/^function focusDashboardSession\([\s\S]*?^}/m);
+    assert.ok(pendingFocus && dashboardFocus);
+    const pendingPermissions = ["company", undefined].map((codexProfileId) => ({
+      sessionId: makeSessionKey({ rawSessionId: codexProfileId
+        ? "codex-profile:company:codex:fixture" : "codex:fixture" }),
+      agentId: "codex", sourcePid: 731, codexProfileId,
+    }));
+    const focused = [];
+    const context = vm.createContext({
+      sessions: new Map(), pendingPermissions, process: { platform: "darwin" },
+      mergeSessionFocusEntry, getSessionFocusTarget,
+      focusLog: () => {},
+      focusTerminalSession: (_entry, id) => { focused.push(id); return true; },
+    });
+    vm.runInContext(pendingFocus[0] + "\n" + dashboardFocus[0], context);
+    const focusFromCard = (sessionId) => context.focusDashboardSession(sessionId, {
+      fallbackEntry: context.getPendingPermissionFocusEntry(sessionId),
+    });
+    assert.strictEqual(focusFromCard(pendingPermissions[0].sessionId), false);
+    assert.strictEqual(focusFromCard(pendingPermissions[1].sessionId), true);
+    assert.deepStrictEqual(focused, [pendingPermissions[1].sessionId]);
+  });
+
+  it("issue #1392: terminal focus drops a Claude Desktop WT handle but keeps a terminal one", () => {
+    // Same VM technique as the dispatcher test above: execute the real
+    // focusTerminalSession and inject the window layer plus the helper it calls.
+    const main = fs.readFileSync(path.join(__dirname, "../src/main.js"), "utf8");
+    const begin = main.indexOf("function focusTerminalSession(");
+    const end = main.indexOf("function focusDashboardSession(", begin);
+    assert.ok(begin >= 0 && end > begin,
+      "focusTerminalSession or focusDashboardSession moved or was renamed; update this test's source boundaries");
+    const calls = [];
+    const context = {
+      focusTerminalWindow: (request) => { calls.push(request); return true; },
+      getSessionFocusWtHwnd, getTerminalFocusSourcePid,
+    };
+    vm.createContext(context);
+    vm.runInContext(main.slice(begin, end), context);
+
+    assert.strictEqual(context.focusTerminalSession({
+      sourcePid: 101, agentPid: 201, claudeEntrypoint: "claude-desktop", wtHwnd: "81", cwd: "C:/work",
+    }, "desktop-session", "hud"), true);
+    assert.strictEqual(context.focusTerminalSession({
+      sourcePid: 102, wtHwnd: "81", cwd: "C:/work",
+    }, "terminal-session", "dashboard"), true);
+
+    assert.strictEqual(calls[0].wtHwnd, null,
+      "a Claude Desktop row must not raise whatever WT window it stored");
+    assert.strictEqual(calls[0].sourcePid, 201, "Claude Desktop uses the agent PID");
+    assert.strictEqual(calls[1].wtHwnd, "81", "ordinary terminal sessions keep their handle");
   });
 
   it("does not launch the desktop app when the URL handler succeeds", async () => {

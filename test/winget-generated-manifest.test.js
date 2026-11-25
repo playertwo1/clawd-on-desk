@@ -22,7 +22,7 @@ const {
 const VERSION = "1.3.0";
 const TAG = `v${VERSION}`;
 const BASE_URL =
-  `https://github.com/rullerzhou-afk/clawd-on-desk/releases/download/${TAG}`;
+  `https://github.com/playertwo1/clawd-on-desk/releases/download/${TAG}`;
 const DIGESTS = {
   x64: "sha256:a3b1a03e9c4fed681ebe6792da6cd99253e0a226a5c3cbebad501b980aae38d3",
   arm64: "sha256:2798c52d0ca11c0d746bf14ba83004543197bdc274fe8775d2b4c77819625dea",
@@ -56,8 +56,8 @@ function fixture({ mutateContract, mutateDocuments, extraFile = "" } = {}) {
     root,
     "generated",
     "manifests",
-    "r",
-    "rullerzhou-afk",
+    "p",
+    "playertwo1",
     "clawd-on-desk",
     VERSION,
   );
@@ -109,19 +109,19 @@ function fixture({ mutateContract, mutateDocuments, extraFile = "" } = {}) {
       PackageIdentifier: PACKAGE_IDENTIFIER,
       PackageVersion: VERSION,
       PackageLocale: "en-US",
-      Publisher: "rullerzhou-afk",
-      PublisherUrl: "https://github.com/rullerzhou-afk",
-      PublisherSupportUrl: "https://github.com/rullerzhou-afk/clawd-on-desk/issues",
+      Publisher: "playertwo1",
+      PublisherUrl: "https://github.com/playertwo1",
+      PublisherSupportUrl: "https://github.com/playertwo1/clawd-on-desk/issues",
       PackageName: "Clawd on Desk",
-      PackageUrl: "https://github.com/rullerzhou-afk/clawd-on-desk",
+      PackageUrl: "https://github.com/playertwo1/clawd-on-desk",
       License: "AGPL-3.0",
-      LicenseUrl: "https://github.com/rullerzhou-afk/clawd-on-desk/blob/HEAD/LICENSE",
+      LicenseUrl: "https://github.com/playertwo1/clawd-on-desk/blob/HEAD/LICENSE",
       Copyright: "Copyright (c) 2026 rullerzhou-afk",
       ShortDescription: "A desktop pet.",
       Description: "Shows AI coding agent activity.",
       Tags: ["desktop-pet"],
       ReleaseNotes: "A test release.",
-      ReleaseNotesUrl: `https://github.com/rullerzhou-afk/clawd-on-desk/releases/tag/${TAG}`,
+      ReleaseNotesUrl: `https://github.com/playertwo1/clawd-on-desk/releases/tag/${TAG}`,
       ManifestType: "defaultLocale",
       ManifestVersion: MANIFEST_VERSION,
     },
@@ -130,7 +130,7 @@ function fixture({ mutateContract, mutateDocuments, extraFile = "" } = {}) {
       PackageVersion: VERSION,
       PackageLocale: "zh-CN",
       License: LICENSE,
-      LicenseUrl: "https://github.com/rullerzhou-afk/clawd-on-desk/blob/v1.0.0/LICENSE",
+      LicenseUrl: "https://github.com/playertwo1/clawd-on-desk/blob/v1.0.0/LICENSE",
       ShortDescription: "一款桌宠。",
       Description: "显示 AI 编程助手的工作状态。",
       Tags: ["桌宠"],
@@ -204,11 +204,11 @@ describe("generated WinGet manifest gate", () => {
         assert.equal(value.License, LICENSE);
         assert.equal(
           value.LicenseUrl,
-          `https://github.com/rullerzhou-afk/clawd-on-desk/blob/${TAG}/LICENSE`,
+          `https://github.com/playertwo1/clawd-on-desk/blob/${TAG}/LICENSE`,
         );
         assert.equal(
           value.ReleaseNotesUrl,
-          `https://github.com/rullerzhou-afk/clawd-on-desk/releases/tag/${TAG}`,
+          `https://github.com/playertwo1/clawd-on-desk/releases/tag/${TAG}`,
         );
       }
     } finally {

@@ -152,6 +152,8 @@ Clawd can display the chat name from Cursor's standard desktop profile when Node
 - **Ownership:** the whole `clawd-state/` plugin directory belongs to Clawd. Clawd proves that with an ownership marker file (`.clawd-managed.json`): a first install is built in a staging folder in the MiniMax data directory (outside `plugins/`, which MiniMax scans in full) and moved into place in one step; install refuses to touch an existing directory without a valid marker, and uninstall moves the verified directory out of `plugins/` before deleting it. A directory name or a script name inside a file never counts as ownership, so a `clawd-state/` folder left by a pre-release build (no marker) must be deleted by hand before installing. An empty `clawd-state/` counts as unclaimed and Install replaces it; a non-empty foreign directory blocks Install, and Install's error names it. If the move fails, Uninstall reports an error with the original path and keeps the install intent. If the move works but the delete fails, the moved folder has already left `plugins/`, so MiniMax does not scan it, and Uninstall succeeds as long as no Clawd plugin is back at the original location at its final check; the leftover `.clawd-minimax-removing-*` folder stays in the MiniMax data directory for you to delete by hand (Settings does not show this warning yet). Right before returning, Uninstall checks the original location once more and reports the integration as still installed if a Clawd plugin is there again (for example, one another Clawd instance just reinstalled); an install that happens after that last check is not covered. A crash mid-install or mid-uninstall can leave `.clawd-minimax-staging-*` / `.clawd-minimax-removing-*` in the data directory — MiniMax does not load those, so delete them manually; there is no automatic cleanup. Only ENOENT/ENOTDIR count as "absent": a path Clawd cannot inspect is never reported as uninstalled. `plugins/` and the data directory must share a filesystem (a cross-device rename fails clearly and is not supported). To decide whether a foreign directory still runs Clawd's hook, Clawd follows the hooks documents the manifest declares — a root `plugin.json`, `.minimax-plugin/`, or `.codex-plugin/` manifest is not modelled and reads as unconfirmable.
 - **Session title:** MiniMax's hook payload carries no session title, so Clawd derives it from the first prompt line and keeps the **first** title per session (server-side first-wins, same as TraeCode).
 
+**T3 Code**: agents run from T3 Code are tracked through their normal integration, so nothing extra needs installing. On Linux under X11, or KDE Plasma 6 or later on Wayland, click-to-focus can raise the T3 Code window.
+
 ## Permission handling automation
 
 Use the pet or tray **Permission handling** submenu to choose how Clawd handles supported permission requests:
@@ -202,15 +204,22 @@ the full list of fields that are sent, secret storage, and troubleshooting.
 
 <img src="../../assets/screenshot-remote-ssh.png" width="560" alt="Remote SSH — permission bubble from Raspberry Pi">
 
-Clawd can sense AI agent activity on remote servers via SSH reverse port forwarding. Hook events and permission requests travel through the SSH tunnel back to your local Clawd — no code changes needed on the Clawd side.
+Clawd senses AI agent activity on remote servers through `ssh -R` reverse port
+forwarding by default. For a POSIX jump host that blocks `ssh -R` or rejects
+multiline commands, manually select **Jump host mode**, save, then run
+**Deploy / Repair Hooks** again. Clawd does not switch modes automatically.
+Jump host mode requires parallel SSH sessions and does not support Windows
+remotes or serialized transports, including automatically detected Codespaces.
+Hook events and permission requests still travel back to your local Clawd
+without changing the agent-side hook contract.
 
 **Supported flow: in-app Settings → Remote SSH → Deploy / Repair Hooks**
 
 DMG / installer users add a profile under **Settings → Remote SSH** (host
 `user@remote-host`, optional private key, forward port), then click
 **Deploy / Repair Hooks**, then connect. Clawd creates a profile-bound local
-ingress, maintains the `ssh -R` reverse tunnel to it, and deploys identity-pinned
-hooks to the remote. Full walkthrough, multi-user upgrade boundary, Doctor boundary, and
+ingress, uses the selected transport mode, and deploys identity-pinned hooks
+to the remote. Full walkthrough, multi-user upgrade boundary, Doctor boundary, and
 troubleshooting (port conflicts, no Node.js, missing remote sessions, etc.)
 in the dedicated guide:
 

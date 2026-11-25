@@ -98,6 +98,7 @@ docs/**
 !docs/releases/release-v1.4.0.md
 !docs/releases/release-v1.5.0.md
 !docs/releases/release-v1.6.0.md
+!docs/releases/release-v1.7.0.md
 
 # Temp files from testing
 .tmp_*
@@ -134,6 +135,8 @@ logs/
 # GIF recording tools (not part of main project)
 scripts/*
 !scripts/apt/
+!scripts/build-remote-ssh-stdio-bridge.js
+!scripts/remote-ssh-stdio-bridge-entry.js
 scripts/apt/__pycache__/
 !scripts/apt/*.py
 # Deterministic source-backed macOS tray asset generator

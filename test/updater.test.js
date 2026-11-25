@@ -7,6 +7,13 @@ const { createHttpError, HttpExecutor, newError } = require(require.resolve("bui
 
 let initUpdater = require("../src/updater");
 
+it("configures packaged updates to use the fork's release feed", () => {
+  const [feed] = require("../package.json").build.publish;
+  assert.deepStrictEqual(feed, {
+    provider: "github", owner: "playertwo1", repo: "clawd-on-desk",
+  });
+});
+
 it("allows ten minutes for git-source dependency installation", () => {
   assert.strictEqual(initUpdater.__test.DEPENDENCY_INSTALL_TIMEOUT_MS, 10 * 60 * 1000);
 });

@@ -3,6 +3,7 @@ const { readCodexClientEphemeral } = require("./codex-session-persistence");
 
 const path = require("path");
 const { resolveSessionIdentity } = require("./session-key");
+const { codexProfileIdentity, resolveExtraCodexHookProfile } = require("./codex-profiles");
 const { normalizeOpencodeAttachUrl } = require("./opencode-attach-target");
 const {
   assessSessionAutomationIdentity,
@@ -355,6 +356,7 @@ function handleStatePost(req, res, options) {
       const trustedProfileId = remoteProfile && typeof remoteProfile.profileId === "string"
         ? remoteProfile.profileId
         : "local";
+      const codexProfile = resolveExtraCodexHookProfile(ctx, data, { agentId, remoteProfile, wslSourced });
       const sessionAutomationIdentity = assessSessionAutomationIdentity({
         agentId,
         channel: "state",
@@ -407,7 +409,9 @@ function handleStatePost(req, res, options) {
       // as `default` so Kiro's cwd-scoped aliases and existing UI contracts do
       // not acquire the internal namespace.
       if (!session_id) session_id = `${agentId}:default`;
-      const sessionIdentity = resolveSessionIdentity(session_id, trustedProfileId, "default");
+      const sessionIdentity = codexProfile
+        ? codexProfileIdentity(session_id, codexProfile, "default")
+        : resolveSessionIdentity(session_id, trustedProfileId, "default");
       const rawStateSessionId = usesBuiltInDefaultStateBucket
         ? "default"
         : sessionIdentity.rawSessionId;
@@ -512,6 +516,8 @@ function handleStatePost(req, res, options) {
       const sessionTitleFromPrompt =
         sessionTitle !== null && data.session_title_from_prompt === true;
       const contextUsage = normalizeContextUsage(data.context_usage);
+      // DeepSeek balance is owned by the local API-key runtime. Deliberately
+      // exclude deepseek_quota/deepseekQuota from HTTP ingress, even on localhost.
       const antigravityQuota = normalizeAntigravityQuota(data.antigravity_quota);
       const claudeQuota = normalizeClaudeQuota(data.claude_quota);
       const codexQuota = normalizeCodexQuota(data.codex_quota);
@@ -558,6 +564,11 @@ function handleStatePost(req, res, options) {
       const codexClientEphemeral = readCodexClientEphemeral(data,
         agentId === "codex" && hookSource === "codex-official"
         && trustedProfileId === "local" && !host && !wslDistro);
+      // Only distinguishes an IDE conversation from a terminal; app ownership
+      // is verified at click time from the live process.
+      const codebuddyClient = agentId === "codebuddy" && typeof data.codebuddy_client === "string" && data.codebuddy_client.trim()
+        ? data.codebuddy_client.trim().slice(0, 64)
+        : null;
       const attachMetadata = agentId === "opencode" && hookSource === "opencode-plugin"
         && trustedProfileId === "local" && !host && !wslDistro && !headless
         && Object.hasOwn(data, "opencode_attach_url")
@@ -668,13 +679,17 @@ function handleStatePost(req, res, options) {
       const acceptedClaudeQuota = localClaudeStatuslineMetadataAllowed ? claudeQuota : null;
       if (typeof ctx.updateAccountQuota === "function"
         && (antigravityQuota || acceptedClaudeQuota || codexQuota || codexSparkQuota)) {
-        const quotaSource = trustedProfileId === "local" ? host : `remote:${trustedProfileId}`;
+        const quotaSource = codexProfile
+          ? codexProfile.quotaSource
+          : (trustedProfileId === "local" ? host : `remote:${trustedProfileId}`);
         ctx.updateAccountQuota(quotaSource, {
           antigravityQuota,
           claudeQuota: acceptedClaudeQuota,
           codexQuota,
           ...(codexSparkQuota ? { codexSparkQuota } : {}),
-          ...(trustedProfileId === "local" ? {} : { displayHost: host }),
+          ...(codexProfile
+            ? { displayHost: codexProfile.label }
+            : (trustedProfileId === "local" ? {} : { displayHost: host })),
         });
       }
       // Local Codex archive lifecycle (#655): once the local task's rollout is
@@ -692,6 +707,7 @@ function handleStatePost(req, res, options) {
         && ctx.shouldSuppressCodexArchive(sessionIdentity.rawSessionId, {
           agentId,
           profileId: trustedProfileId,
+          ...(codexProfile ? { codexProfileId: codexProfile.id } : {}),
           host,
           wslDistro,
         });
@@ -729,6 +745,7 @@ function handleStatePost(req, res, options) {
             host,
             codexOriginator,
             codexSource,
+            ...(codexProfile ? { codexProfileId: codexProfile.id } : {}),
           });
         if (!shown) {
           res.writeHead(204, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });
@@ -1220,44 +1237,6 @@ function handleStatePost(req, res, options) {
             if (typeof ctx.resolveClaudeTurnAskReminder === "function") ctx.resolveClaudeTurnAskReminder(sid);
           }
         }
-        // Same card for Codex / Antigravity: a main-thread Stop whose last
-        // message ends with a question (claude-turn-ask.js). Headless Codex
-        // threads (subagents, internal workers) never ask the user anything.
-        if (hasExplicitPermissionLifecycleSession
-          && TURN_END_QUESTION_AGENTS.has(agentId)
-          && !subagentId
-          && codexHookState.headless !== true) {
-          const turnEndAction = decideTurnEndQuestionAction({ event, assistantLastOutput });
-          if (turnEndAction === "show") {
-            const turnAskPayload = {
-              agentId,
-              sessionId: sid,
-              toolUseId: null,
-              ask: extractTurnEndQuestion(assistantLastOutput),
-              actions: [],
-              sourcePid: effectiveProcessMetadata.sourcePid,
-              agentPid: effectiveProcessMetadata.agentPid,
-              cwd,
-              host,
-            };
-            if (typeof ctx.showClaudeTurnAskBubble === "function") ctx.showClaudeTurnAskBubble(turnAskPayload);
-            if (typeof ctx.trackClaudeTurnAskReminder === "function") ctx.trackClaudeTurnAskReminder(turnAskPayload);
-          } else if (turnEndAction === "clear") {
-            if (typeof ctx.clearClaudeTurnAskBubbles === "function") {
-              ctx.clearClaudeTurnAskBubbles(sid, `turn-end-question:${event}`);
-            }
-            if (typeof ctx.resolveClaudeTurnAskReminder === "function") ctx.resolveClaudeTurnAskReminder(sid);
-            // Their Stop is the completion: the snapshot "done" badge is not
-            // reliable for Codex Desktop threads, so the task-done card is
-            // raised here instead (src/completion-bubble.js skips them).
-            if (event === "Stop" && typeof ctx.showTaskDoneBubble === "function") {
-              const card = buildCompletionCard({
-                id: sid, agentId, assistantLastOutput, badge: "done", orcaPaneKey, cwd, host,
-              });
-              if (card) ctx.showTaskDoneBubble(card);
-            }
-          }
-        }
         recordRequestHookEvent.acceptedUnlessDnd(shouldDropForDnd());
         let sessionUpdateApplied = true;
         if (svg && !(claudeToolPhaseDecision && claudeToolPhaseDecision.preservePhase)) {
@@ -1284,6 +1263,7 @@ function handleStatePost(req, res, options) {
             ...(recapBoundary ? { recapBoundary } : {}),
             ...((recapIsSubagent || codexHookState.headless === true) ? { recapIsSubagent: true } : {}),
             profileId: sessionIdentity.profileId,
+            ...(codexProfile ? { codexProfileId: codexProfile.id, codexProfileLabel: codexProfile.label } : {}),
             rawSessionId: rawStateSessionId,
             host,
             wslDistro,
@@ -1296,6 +1276,7 @@ function handleStatePost(req, res, options) {
             codexOriginator,
             codexSource,
             dshCarrier,
+            ...(codebuddyClient ? { codebuddyClient } : {}),
             ghosttyTerminalId,
             displayHint: display_svg,
             sessionTitle,
@@ -1348,6 +1329,44 @@ function handleStatePost(req, res, options) {
         }
         if (grokFenceDecision && typeof grokFenceDecision.commit === "function" && sessionUpdateApplied) {
           grokFenceDecision.commit();
+        }
+        // Same card for Codex / Antigravity: a main-thread Stop whose last
+        // message ends with a question (claude-turn-ask.js). Headless Codex
+        // threads (subagents, internal workers) never ask the user anything.
+        if (sessionUpdateApplied && !svg && hasExplicitPermissionLifecycleSession
+          && TURN_END_QUESTION_AGENTS.has(agentId)
+          && !subagentId
+          && !effHeadless && !codexInternalThread) {
+          const turnEndAction = decideTurnEndQuestionAction({ event, assistantLastOutput });
+          if (turnEndAction === "show") {
+            const turnAskPayload = {
+              agentId,
+              sessionId: sid,
+              toolUseId: null,
+              ask: extractTurnEndQuestion(assistantLastOutput),
+              actions: [],
+              sourcePid: effectiveProcessMetadata.sourcePid,
+              agentPid: effectiveProcessMetadata.agentPid,
+              cwd,
+              host,
+            };
+            if (typeof ctx.showClaudeTurnAskBubble === "function") ctx.showClaudeTurnAskBubble(turnAskPayload);
+            if (typeof ctx.trackClaudeTurnAskReminder === "function") ctx.trackClaudeTurnAskReminder(turnAskPayload);
+          } else if (turnEndAction === "clear") {
+            if (typeof ctx.clearClaudeTurnAskBubbles === "function") {
+              ctx.clearClaudeTurnAskBubbles(sid, `turn-end-question:${event}`);
+            }
+            if (typeof ctx.resolveClaudeTurnAskReminder === "function") ctx.resolveClaudeTurnAskReminder(sid);
+            // Their Stop is the completion: the snapshot "done" badge is not
+            // reliable for Codex Desktop threads, so the task-done card is
+            // raised here instead (src/completion-bubble.js skips them).
+            if (event === "Stop" && typeof ctx.showTaskDoneBubble === "function") {
+              const card = buildCompletionCard({
+                id: sid, agentId, assistantLastOutput, badge: "done", orcaPaneKey, cwd, host,
+              });
+              if (card) ctx.showTaskDoneBubble(card);
+            }
+          }
         }
         // Decorative only: the lifecycle update above remains authoritative.
         // Main owns the opt-in / DND / visibility / mini / drag gate; a visual

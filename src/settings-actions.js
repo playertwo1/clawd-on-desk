@@ -484,6 +484,17 @@ const updateRegistry = {
     }
     return { status: "ok" };
   },
+  quotaRingShownProviders: {
+    commandOnly: true,
+    validate(value) {
+      // Matches prefs.normalizeQuotaRingShownProviders and geometry.RING_MAX_COINS;
+      // the command limits provider choices, while geometry limits actual coins.
+      return value === null || (Array.isArray(value) && value.length <= 3
+        && value.every((key) => typeof key === "string" && key.trim()))
+        ? { status: "ok" }
+        : { status: "error", message: "Choose at most 3 quota providers" };
+    },
+  },
   claudeQuotaCollectionEnabled: {
     validate: requireBoolean("claudeQuotaCollectionEnabled"),
     effect(value, deps = {}) {
@@ -493,9 +504,13 @@ const updateRegistry = {
       return deps.setClaudeQuotaCollectionEnabled(value);
     },
   },
-  // Only the dedicated, trusted Kimi quota IPC path may change this opt-in.
+  // Only dedicated, trusted credential IPC paths may change these opt-ins.
   // Generic settings:update/applyBulk/hydrate are intentionally rejected by
   // the controller's commandOnly boundary.
+  deepseekBalanceCollectionEnabled: {
+    validate: requireBoolean("deepseekBalanceCollectionEnabled"),
+    commandOnly: true,
+  },
   kimiQuotaCollectionEnabled: {
     validate: requireBoolean("kimiQuotaCollectionEnabled"),
     commandOnly: true,
@@ -944,6 +959,18 @@ function setKimiQuotaCollectionEnabled(payload) {
 }
 setKimiQuotaCollectionEnabled.lockKey = "kimiQuota";
 
+function setDeepseekBalanceCollectionEnabled(payload) {
+  const enabled = typeof payload === "boolean" ? payload : payload && payload.enabled;
+  if (typeof enabled !== "boolean") {
+    return {
+      status: "error",
+      message: "setDeepseekBalanceCollectionEnabled.enabled must be a boolean",
+    };
+  }
+  return { status: "ok", commit: { deepseekBalanceCollectionEnabled: enabled } };
+}
+setDeepseekBalanceCollectionEnabled.lockKey = "deepseekBalance";
+
 // Permission automation writer. A plain settings:update cannot reach this
 // field; both automatic modes require confirmation at the data layer, including
 // an auto-tools -> unattended escalation. Turning automation off is always
@@ -1235,14 +1262,14 @@ function setSessionAlias(payload, deps) {
   if (!payload || typeof payload !== "object") {
     return { status: "error", message: "setSessionAlias: payload must be an object" };
   }
-  const { host, agentId, sessionId, rawSessionId, profileId, cwd, alias } = payload;
+  const { host, agentId, sessionId, rawSessionId, profileId, codexProfileId, cwd, alias } = payload;
   // sessionId is the canonical action id for remote sessions. Alias storage
   // is keyed by the trusted profile scope plus the separately transported raw
   // id so the opaque action id never leaks into visible/legacy alias keys.
   const aliasSessionId = typeof rawSessionId === "string" && rawSessionId.trim()
     ? rawSessionId
     : sessionId;
-  const key = sessionAliasKey(host, agentId, aliasSessionId, { cwd, profileId });
+  const key = sessionAliasKey(host, agentId, aliasSessionId, { cwd, profileId, codexProfileId });
   if (!key) {
     return { status: "error", message: "setSessionAlias.sessionId must be a non-empty string" };
   }
@@ -1682,6 +1709,10 @@ function copyRemoteNodeDetection(target, source) {
 }
 
 function remoteSshAddProfile(payload, deps) {
+  if (payload && payload.tunnelMode !== undefined
+    && payload.tunnelMode !== "reverse" && payload.tunnelMode !== "stdio") {
+    return { status: "error", message: "profile.tunnelMode must be reverse or stdio" };
+  }
   const profile = sanitizeRemoteSshProfile(payload);
   if (!profile) {
     const detail = validateRemoteSshProfile(payload || {});
@@ -1704,6 +1735,10 @@ function remoteSshAddProfile(payload, deps) {
 function remoteSshUpdateProfile(payload, deps) {
   if (!payload || typeof payload !== "object") {
     return { status: "error", message: "remoteSsh.update: payload must be an object" };
+  }
+  if (payload && payload.tunnelMode !== undefined
+    && payload.tunnelMode !== "reverse" && payload.tunnelMode !== "stdio") {
+    return { status: "error", message: "profile.tunnelMode must be reverse or stdio" };
   }
   const profile = sanitizeRemoteSshProfile(payload);
   if (!profile) {
@@ -2866,7 +2901,33 @@ function setTextScaleForDisplay(payload, deps) {
   return { status: "ok", commit: { textScaleByDisplay: next } };
 }
 
+function setQuotaRingProviderShown(payload, deps = {}) {
+  if (!payload || typeof payload.key !== "string" || !payload.key.trim()
+    || typeof payload.shown !== "boolean") {
+    return { status: "error", message: "A provider key and shown flag are required" };
+  }
+  const snapshot = deps.snapshot || {};
+  // The UI passes the actual visible set for the first toggle. After that,
+  // durable selections win over stale UI lists and preserve absent providers.
+  // Keep this provider-choice cap in sync with the validator above, prefs'
+  // normalization and quota-ring-geometry.RING_MAX_COINS.
+  const current = Array.isArray(snapshot.quotaRingShownProviders)
+    ? snapshot.quotaRingShownProviders : payload.currentShownProviders;
+  if (!Array.isArray(current) || current.length > 3
+    || current.some((key) => typeof key !== "string" || !key.trim())) {
+    return { status: "error", message: "Current quota selection must contain at most 3 provider keys" };
+  }
+  const key = payload.key.replace(/\0/g, "").trim().slice(0, 64);
+  const next = [...new Set(current)].filter((entry) => entry !== key);
+  if (payload.shown) next.push(key);
+  if (next.length > 3 || !key) {
+    return { status: "error", message: "Choose at most 3 quota providers" };
+  }
+  return { status: "ok", commit: { quotaRingShownProviders: next } };
+}
+
 const commandRegistry = {
+  setQuotaRingProviderShown,
   addCustomApplication,
   removeTheme,
   installHooks,
@@ -2898,6 +2959,7 @@ const commandRegistry = {
   setAgentPermissionMode,
   setAllBubblesHidden,
   setKimiQuotaCollectionEnabled,
+  setDeepseekBalanceCollectionEnabled,
   setPermissionAutomationMode,
   setMobilePermissionPreviewEnabled,
   "mobilePreview.refreshPairCode": refreshMobilePairCode,

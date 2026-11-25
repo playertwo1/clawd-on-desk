@@ -56,6 +56,7 @@ const { createClaudeToolPhaseLedger } = require("./claude-tool-phase");
 const { classifyPermissionInteraction, INTERACTION_INTENT } = require("./permission-automation-policy");
 const { getStartupRecoveryProcessNames } = require("../agents/registry");
 const { normalizeCodexTurnId } = require("./codex-turn-id");
+const { DEFAULT_CODEX_PROFILE_ID, isValidCodexProfileId, normalizeProfileLabel } = require("./codex-profiles");
 const { TERMINAL_EVENTS: CODEX_TERMINAL_EVENTS } = require("./codex-turn-fence");
 const { hasReusableDefaultIdentity, mapRecapMetrics } = require("./recap-metrics");
 const {
@@ -84,6 +85,23 @@ function normalizeGhosttyTerminalId(value) {
   if (!text || text.length > 160) return null;
   if (/^(error|unsupported|missing|miss)([-:]|$)/i.test(text)) return null;
   return text;
+}
+
+function normalizeLocalCodexProfileFields(input = {}, existing = null) {
+  if (input.agentId !== "codex" || (input.profileId || "local") !== "local"
+    || input.host || input.wslDistro) return {};
+  const candidateId = typeof input.codexProfileId === "string" ? input.codexProfileId.trim() : "";
+  const existingId = existing && typeof existing.codexProfileId === "string"
+    ? existing.codexProfileId
+    : "";
+  const profileId = isValidCodexProfileId(candidateId)
+    ? candidateId
+    : (isValidCodexProfileId(existingId) ? existingId : DEFAULT_CODEX_PROFILE_ID);
+  if (profileId === DEFAULT_CODEX_PROFILE_ID) return {};
+  const profileLabel = normalizeProfileLabel(input.codexProfileLabel)
+    || normalizeProfileLabel(existing && existing.codexProfileLabel)
+    || profileId;
+  return { codexProfileId: profileId, codexProfileLabel: profileLabel };
 }
 
 function normalizePositiveInteger(value) {
@@ -216,12 +234,133 @@ function hasCodexCompactionVisual() {
 
 const sessions = new Map();
 const codexSubagentPresentation = require("./codex-subagent-presentation")(sessions, () => Date.now());
+const qoderSubagentPresentation = require("./qoder-desktop-sessions").createQoderSubagentPresentation(sessions, () => Date.now());
 // A parent's Stop can settle its turn while delegated children still own the visual.
 const deferredCodexCompletionCues = new Set();
 let lastPendingAttentionIds = new Set();
 // The owner of a Codex plan belongs to the state runtime, not a session or
 // its snapshot. Clearing an evicted session also discards its turn ownership.
 const codexSessionTurnIds = new Map();
+// Only a process-exit sweep may leave a recoverable active row. This private,
+// bounded cache contains identity/display metadata, never transcript contents.
+const codexProcessExitRecovery = new Map();
+const CODEX_PROCESS_RECOVERY_TTL_MS = 10 * 60 * 1000;
+const CODEX_PROCESS_RECOVERY_LIMIT = 200;
+const CODEX_LIVE_PROCESS_FRESH_MS = 30000;
+
+function isLocalInteractiveCodex(session) {
+  return !!session && session.agentId === "codex"
+    && (session.profileId || "local") === "local"
+    && !session.host && !session.wslDistro
+    && String(session.platform || "").trim().toLowerCase() !== "wsl" && !session.headless;
+}
+
+// Shared by an existing row and the row rebuilt from process-exit evidence. The
+// caller owns turn-ownership: a rebuilt row has no live turn map entry yet.
+function isCodexLiveProgressTarget(session, transcriptPath) {
+  return isLocalInteractiveCodex(session)
+    && !session.requiresCompletionAck
+    && normalizeTranscriptPath(session.transcriptPath) === transcriptPath;
+}
+
+function pruneCodexProcessExitRecovery() {
+  const cutoff = Date.now() - CODEX_PROCESS_RECOVERY_TTL_MS;
+  for (const [id, entry] of codexProcessExitRecovery) {
+    if (entry.retiredAt < cutoff) codexProcessExitRecovery.delete(id);
+  }
+}
+
+// A late initializer may consult this tuple, but only genuine fenced progress
+// can consume it and restore a row. The query never extends its retention TTL.
+function hasRecoverableCodexProcessExit(sessionId, opts = {}) {
+  pruneCodexProcessExitRecovery();
+  const turnId = normalizeCodexTurnId(opts.turnId);
+  const transcriptPath = normalizeTranscriptPath(opts.transcriptPath);
+  const retired = codexProcessExitRecovery.get(sessionId);
+  const missingInitializerPath = opts.allowMissingInitializerPath === true
+    && (opts.transcriptPath == null || opts.transcriptPath === "");
+  return !sessions.has(sessionId) && !!turnId && !!retired && retired.turnId === turnId
+    && (missingInitializerPath || (!!transcriptPath && retired.metadata.transcriptPath === transcriptPath));
+}
+
+// The raw ids whose only remaining trace is process-exit recovery evidence.
+// This prunes expired records first (without extending retention) and hands the
+// ids to archive scanning, so confirmed archive evidence revokes recovery;
+// otherwise unarchive could let the old turn restore its row.
+function listRecoverableCodexRawSessionIds(codexProfileId = DEFAULT_CODEX_PROFILE_ID) {
+  pruneCodexProcessExitRecovery();
+  const ids = [];
+  for (const entry of codexProcessExitRecovery.values()) {
+    const metadata = entry?.metadata;
+    if ((metadata?.codexProfileId || DEFAULT_CODEX_PROFILE_ID) !== codexProfileId) continue;
+    const raw = metadata?.rawSessionId;
+    if (typeof raw === "string" && raw) ids.push(raw);
+  }
+  return ids;
+}
+
+// Archive evidence must revoke recovery even when an agent-exit sweep already
+// removed the row; otherwise a later unarchive could revive its old turn.
+function forgetCodexProcessExit(sessionId) {
+  const id = typeof sessionId === "string" ? sessionId : "";
+  if (!id) return false;
+  return codexProcessExitRecovery.delete(id);
+}
+
+// Only fields updateCodexInitializationMetadata actually replays: process and
+// focus identity plus the metadata it may safely enrich. A prompt-derived
+// title is never retained, so it cannot become a formal title after restore.
+// The path and platform are not retained: the restored row takes them from the
+// recovery record, so a stale initializer cannot fail the post-insert identity
+// check and leave a wrongly keyed row behind.
+const CODEX_INITIALIZATION_RECOVERY_KEYS = [
+  "agentId", "profileId", "hookSource", "sourcePid", "agentPid", "wtHwnd", "editor",
+  "pidChain", "cwd", "tmuxSocket", "tmuxClient", "orcaPaneKey", "ghosttyTerminalId",
+  "sessionAutomationIdentity", "provider", "codexOriginator", "codexSource",
+  "codexClientEphemeral", "sessionTitle", "sessionTitleFromPrompt",
+  "model", "contextUsage", "contextUsageOrigin",
+];
+
+// A late initializer is held back because it cannot replace the retired active
+// turn with idle. Its new writer metadata still belongs to the conversation, so
+// stash it on the same recovery record for the later real-progress restore.
+function retainCodexInitializationForRecovery(sessionId, opts = {}) {
+  pruneCodexProcessExitRecovery();
+  const retired = codexProcessExitRecovery.get(sessionId);
+  if (!retired || sessions.has(sessionId)) return false;
+  const turnId = normalizeCodexTurnId(opts.turnId);
+  if (!turnId || retired.turnId !== turnId) return false;
+  const retained = {};
+  for (const key of CODEX_INITIALIZATION_RECOVERY_KEYS) {
+    if (opts[key] !== undefined) retained[key] = opts[key];
+  }
+  if (retained.sessionTitleFromPrompt === true) retained.sessionTitle = null;
+  // Process and focus fields are one writer's set. Replacing the whole stash
+  // avoids pairing an earlier focus target with a later writer's PID.
+  retired.initialization = retained;
+  return true;
+}
+
+function rememberCodexProcessExit(sessionId, session) {
+  const turnId = codexSessionTurnIds.get(sessionId);
+  if (!isLocalInteractiveCodex(session) || !isWorkingLikeState(session.state)
+    || !turnId || !session.transcriptPath || session.requiresCompletionAck) return;
+  pruneCodexProcessExitRecovery();
+  const metadata = {};
+  for (const key of ["agentId", "profileId", "rawSessionId", "cwd", "transcriptPath",
+    "platform", "provider", "model", "codexOriginator", "codexSource", "codexClientEphemeral",
+    "codexProfileId", "codexProfileLabel"]) {
+    if (session[key] !== undefined) metadata[key] = session[key];
+  }
+  if (session.sessionTitleFromPrompt !== true) metadata.sessionTitle = session.sessionTitle || null;
+  codexProcessExitRecovery.delete(sessionId);
+  codexProcessExitRecovery.set(sessionId, {
+    turnId, retiredAt: Date.now(), activityAt: session.updatedAt, metadata,
+  });
+  while (codexProcessExitRecovery.size > CODEX_PROCESS_RECOVERY_LIMIT) {
+    codexProcessExitRecovery.delete(codexProcessExitRecovery.keys().next().value);
+  }
+}
 const claudeToolPhases = createClaudeToolPhaseLedger();
 // Account-wide rate-limit quota, keyed by reporting source — deliberately
 // NOT session state (see src/state-account-quota.js). Persistence is
@@ -229,6 +368,7 @@ const claudeToolPhases = createClaudeToolPhaseLedger();
 // filesystem-free; main.js passes the real path.
 const accountQuota = createAccountQuotaStore({
   persistPath: ctx.accountQuotaPersistPath || null,
+  codexProfiles: ctx.codexProfiles,
   logWarn: console.warn,
 });
 // Upgrade cleanup: older builds retained the last local Claude quota even
@@ -239,6 +379,9 @@ if (ctx.claudeQuotaCollectionEnabled === false) {
 }
 if (ctx.kimiQuotaCollectionEnabled === false) {
   clearLocalKimiQuota({ broadcast: false });
+}
+if (ctx.deepseekBalanceCollectionEnabled === false) {
+  clearLocalDeepseekQuota({ broadcast: false });
 }
 const MAX_SESSIONS = 20;
 const ASSISTANT_OUTPUT_MAX = 2400;
@@ -486,6 +629,11 @@ function hasConfirmedPermissionAnimationLock() {
 // from a different terminal lands back on the same entry — which is why the
 // identity check below exists rather than a longer list of event names.
 const SESSION_START_EVENTS = new Set(["SessionStart", "sessionStart", "agentSpawn"]);
+
+// Copilot reports its raw "sessionEnd"; other agents report "SessionEnd". The
+// state machine treats both spellings as end events. A main-session end usually
+// deletes the row; subagent-scoped ends and replyable Codex sessions keep theirs.
+const SESSION_END_EVENTS = new Set(["SessionEnd", "sessionEnd"]);
 
 // A pane key names one specific Orca pane, and focus consults it before the
 // sourcePid/wtHwnd that would otherwise be authoritative. So an event reporting a
@@ -1294,7 +1442,9 @@ function buildSessionSnapshot() {
   return buildSessionSnapshotFromSessions(sessions, {
     getSessionPresentation: (id) => ({
       effectiveState: projected.get(id)?.state,
-      activeSubagentCount: codexSubagentPresentation.count(id),
+      activeSubagentCount: sessions.get(id)?.agentId === "qoder"
+        ? qoderSubagentPresentation.count(id)
+        : codexSubagentPresentation.count(id),
       pendingAttention: hudPendingAttentionIds.has(id),
     }),
     t: ctx.t,
@@ -1352,6 +1502,13 @@ function resolveRecapScopeId(input) {
   const scope = resolveRecapScope(input);
   if (scope === "remote") return input.profileId;
   if (scope === "wsl") return input.wslDistro || "wsl";
+  // The journal HMACs the ephemeral scope/session/dedupe identifiers before
+  // persisting them. Keep the legacy default scope exactly as before, but
+  // isolate additional local Codex profiles sharing upstream raw IDs.
+  if (input && input.agentId === "codex" && input.codexProfileId
+    && input.codexProfileId !== DEFAULT_CODEX_PROFILE_ID) {
+    return `codex-profile:${input.codexProfileId}`;
+  }
   return "local";
 }
 
@@ -1637,18 +1794,21 @@ function resolveIncomingAgentId(existing, incomingAgentId, incomingDefaulted) {
 function normalizeContextUsage(value) {
   if (!value || typeof value !== "object") return null;
   const used = Number(value.used);
-  if (!Number.isFinite(used) || used < 0) return null;
-  const out = { used };
+  const usedKnown = Number.isFinite(used) && used >= 0;
+  const percent = Number(value.percent);
+  const percentKnown = Number.isFinite(percent);
+  if (!usedKnown && !percentKnown) return null;
+  const out = {};
+  if (usedKnown) out.used = used;
   const limit = Number(value.limit);
   if (Number.isFinite(limit) && limit > 0) out.limit = limit;
-  const percent = Number(value.percent);
-  if (Number.isFinite(percent)) out.percent = Math.max(0, Math.min(100, Math.round(percent)));
-  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity" || value.source === "opencode" || value.source === "workbuddy") out.source = value.source;
+  if (percentKnown) out.percent = Math.max(0, Math.min(100, Math.round(percent)));
+  if (value.source === "claude" || value.source === "codex" || value.source === "antigravity" || value.source === "opencode" || value.source === "workbuddy" || value.source === "qoder") out.source = value.source;
   return out;
 }
 
 function normalizeContextUsageOrigin(value) {
-  return value === "claude-statusline" || value === "claude-transcript" || value === "opencode-statusline" || value === "workbuddy-native" ? value : null;
+  return value === "claude-statusline" || value === "claude-transcript" || value === "opencode-statusline" || value === "workbuddy-native" || value === "qoder-native" ? value : null;
 }
 
 function isStatuslineOrigin(origin) {
@@ -1703,12 +1863,119 @@ function updateSessionFocusMetadata(sessionId, opts = {}) {
   return true;
 }
 
+function normalizeCodexLiveProgressInput(opts = {}) {
+  if (opts.activityState !== "thinking" && opts.activityState !== "working") return null;
+  const occurredAt = opts.now;
+  const turnId = normalizeCodexTurnId(opts.turnId);
+  const transcriptPath = normalizeTranscriptPath(opts.transcriptPath);
+  if (!turnId || !transcriptPath || !Number.isSafeInteger(occurredAt)
+    || occurredAt < Date.now() - CODEX_LIVE_PROCESS_FRESH_MS
+    || occurredAt > Date.now() + 1500) return null;
+  return { turnId, transcriptPath, occurredAt, activityState: opts.activityState };
+}
+
+function buildRestoredCodexSession(retired, activityState, occurredAt) {
+  return { ...retired.metadata, state: activityState === "thinking" ? "thinking" : "working",
+    updatedAt: occurredAt, recentEvents: [], sourcePid: null, agentPid: null, pidReachable: false };
+}
+
+// Side-effect free: decides whether this progress may restore a retired row.
+// Callers use it before touching the turn fence; only acceptCodexLiveProcessProgress
+// commits the restored session.
+function canRestoreCodexProcessExit(sessionId, opts = {}) {
+  const input = normalizeCodexLiveProgressInput(opts);
+  if (!input) return false;
+  if (!hasRecoverableCodexProcessExit(sessionId, {
+    turnId: input.turnId, transcriptPath: input.transcriptPath,
+  })) return false;
+  const retired = codexProcessExitRecovery.get(sessionId);
+  if (!retired || input.occurredAt < retired.activityAt) return false;
+  const candidate = buildRestoredCodexSession(retired, input.activityState, input.occurredAt);
+  // A fresh record is evidence of this thread, but the configured inactivity
+  // window still decides whether that observation is recent enough to revive.
+  const decision = getStaleSessionDecision(candidate, {
+    now: Date.now(), isProcessAlive, deriveSessionBadge, shouldAutoClearDetachedSession,
+    staleConfig: typeof ctx.getStaleConfig === "function" ? ctx.getStaleConfig() : null,
+  });
+  if (decision.action) return false;
+  return isCodexLiveProgressTarget(candidate, input.transcriptPath);
+}
+
+// Runtime-only entry point after the local transcript's open-turn fence. Fresh
+// thread evidence can detach disproven process identity or restore only a row
+// that this runtime's agent-exit sweep retired.
+function acceptCodexLiveProcessProgress(sessionId, opts = {}) {
+  const input = normalizeCodexLiveProgressInput(opts);
+  if (!input) return false;
+  const { turnId, transcriptPath, occurredAt } = input;
+  pruneCodexProcessExitRecovery();
+  let session = sessions.get(sessionId);
+  let recovering = false;
+  if (!session) {
+    if (!canRestoreCodexProcessExit(sessionId, {
+      turnId, transcriptPath, activityState: input.activityState, now: occurredAt,
+    })) return false;
+    const retired = codexProcessExitRecovery.get(sessionId);
+    session = buildRestoredCodexSession(retired, input.activityState, occurredAt);
+    evictOldestSessionIfNeeded(sessionId);
+    sessions.set(sessionId, session);
+    codexSessionTurnIds.set(sessionId, turnId);
+    // Reattach the held initializer's process/focus identity through the same
+    // accepted-metadata path a live initializer uses. The dead-process check
+    // below then detaches it if the stashed PID already exited.
+    if (retired.initialization) {
+      updateCodexInitializationMetadata(sessionId, retired.initialization);
+    }
+    recovering = true;
+  }
+  if (!isCodexLiveProgressTarget(session, transcriptPath)
+    || codexSessionTurnIds.get(sessionId) !== turnId) return false;
+  // A post-restart writer can continue the same rollout while the old Desktop
+  // app-server PID is dead. Drop only disproven identity; never bind all rows to
+  // whichever codex.exe happens to be alive on the host.
+  const agentDead = !!session.agentPid && !isProcessAlive(session.agentPid);
+  const sourceDead = !!session.sourcePid && !isProcessAlive(session.sourcePid);
+  if (agentDead || sourceDead) {
+    if (agentDead) session.agentPid = null;
+    // These focus targets were captured together with this process group. Once
+    // any member is disproven, none of them can still prove ownership, so drop
+    // them all; a later hook with valid metadata can re-attach them.
+    session.sourcePid = null;
+    session.pidChain = null;
+    session.wtHwnd = null;
+    session.orcaPaneKey = null;
+    session.ghosttyTerminalId = null;
+    session.editor = null;
+    session.tmuxSocket = null;
+    session.tmuxClient = null;
+    session.herdrPaneId = null;
+    session.herdrSocket = null;
+    session.dshCarrier = null;
+    session.sessionAutomationIdentity = null;
+    session.pidReachable = resolvePidReachable(null, session.agentPid, session.sourcePid);
+    debugSession(`codex-live-process detach sid=${sessionId}`);
+  }
+  codexProcessExitRecovery.delete(sessionId);
+  const touched = touchSessionActivity(sessionId, {
+    agentId: "codex", profileId: "local", localOnly: true, reviveIdle: true,
+    activityState: opts.activityState, onlyWorkingTimeout: true, now: occurredAt,
+  });
+  if (recovering) {
+    const resolved = resolveDisplayState();
+    setState(resolved, getSvgOverride(resolved));
+    debugSession(`codex-live-process recover sid=${sessionId}`);
+  }
+  return touched;
+}
+
 // Refresh lifecycle liveness from a request-bound observer without inventing a
 // hook event. This deliberately sits between updateSessionFocusMetadata (which
 // owns focus-only fields) and updateSessionMetadata (which must never affect
 // staleness): a correlated request_user_input request/output is real turn
 // activity, but it must not create a ghost row, append recentEvents, fire a
 // sound, or manufacture a completion boundary.
+// The adjacent acceptCodexLiveProcessProgress is the only entry that may
+// insert a row for a Codex process handoff; this function never creates one.
 function touchSessionActivity(sessionId, opts = {}) {
   const id = typeof sessionId === "string" ? sessionId : "";
   if (!id) return false;
@@ -1984,6 +2251,21 @@ function clearLocalKimiQuota(options = {}) {
   return { cleared: cleared > 0, persisted };
 }
 
+function commitLocalDeepseekQuota(deepseekQuota) {
+  const result = accountQuota.updateDetailed(null, { deepseekQuota });
+  if (!result.accepted) return { accepted: false, persisted: false };
+  const persisted = accountQuota.flush();
+  if (result.changed) emitSessionSnapshot();
+  return { accepted: true, persisted: persisted === true };
+}
+
+function clearLocalDeepseekQuota(options = {}) {
+  const cleared = accountQuota.clearProvider("deepseekQuota", (sourceKey) => sourceKey === "");
+  const persisted = cleared ? accountQuota.flush() === true : true;
+  if (cleared && options.broadcast !== false) emitSessionSnapshot();
+  return { cleared: cleared > 0, persisted };
+}
+
 // Distinct reporting sources that currently carry quota (this machine + WSL /
 // SSH remotes), UNmerged. The settings UI hides the "merge across machines"
 // switch when there is only one source, since merging is then a no-op.
@@ -2054,8 +2336,11 @@ function clearAllClaudeTranscriptCompletionProbes() {
 }
 
 function deleteSessionWithCompletionCleanup(sessionId, reason) {
+  if (reason === "stale-delete-agent-exit") rememberCodexProcessExit(sessionId, sessions.get(sessionId));
+  else codexProcessExitRecovery.delete(sessionId);
   deferredCodexCompletionCues.delete(sessionId);
   codexSubagentPresentation.delete(sessionId);
+  qoderSubagentPresentation.delete(sessionId);
   releaseCodexCompaction(sessionId);
   codexCompactionCompletions.delete(sessionId);
   codexSessionTurnIds.delete(sessionId);
@@ -2202,6 +2487,7 @@ function promoteCompletion(sessionId, completionPayload = undefined) {
     rawSessionId: session.rawSessionId || sessionId,
     agentId: session.agentId,
     profileId: session.profileId || "local",
+    codexProfileId: session.codexProfileId || null,
     host: session.host || null,
     wslDistro: session.wslDistro || null,
     event: "Stop",
@@ -2293,7 +2579,7 @@ function mergeSessionProcessMetadata(existing, incoming = {}, options = {}) {
 // overwrite the first one (matching Trae's constant session title).
 // MiniMax Code carries no session title in its hook payload either, so its
 // prompt-derived titles follow the same first-wins rule, as do Kiro IDE titles.
-const FIRST_WINS_TITLE_AGENT_IDS = new Set(["traecode", "minimax", "kiro-desktop"]);
+const FIRST_WINS_TITLE_AGENT_IDS = new Set(["traecode", "minimax", "kiro-desktop", "codebuddy"]);
 
 function resolveIncomingSessionTitle(existing, agentId, incomingTitle, incomingFromPrompt = false) {
   const normalized = normalizeTitle(incomingTitle);
@@ -2355,6 +2641,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   // completion timers, acknowledgement, history or activity freshness.
   const phase = opts.claudeToolPhaseDecision || observeClaudeToolPhase(sessionId, event, opts);
   if (!phase.accept) return false;
+  codexProcessExitRecovery.delete(sessionId);
   if (phase.preservePhase && !phase.errorCue) {
     const existing = sessions.get(sessionId);
     const syntheticToolStart = event === "SubagentStart" && opts.subagentLifecycleSource === "synthetic-tool";
@@ -2426,7 +2713,10 @@ function updateSession(sessionId, state, event, opts = {}) {
     provider = null,
     codexOriginator = null,
     codexSource = null,
+    codexProfileId = null,
+    codexProfileLabel = null,
     dshCarrier = null,
+    codebuddyClient = null,
     ghosttyTerminalId = null,
     displayHint = undefined,
     sessionTitle = null,
@@ -2534,6 +2824,7 @@ function updateSession(sessionId, state, event, opts = {}) {
       rawSessionId: (sessionForPerm && sessionForPerm.rawSessionId) || rawSessionId || sessionId,
       agentId: permAgentId,
       profileId: (sessionForPerm && sessionForPerm.profileId) || profileId || "local",
+      codexProfileId: (sessionForPerm && sessionForPerm.codexProfileId) || codexProfileId || null,
       host: host || (sessionForPerm && sessionForPerm.host) || null,
       wslDistro: wslDistro || (sessionForPerm && sessionForPerm.wslDistro) || null,
       event,
@@ -2601,6 +2892,14 @@ function updateSession(sessionId, state, event, opts = {}) {
       const srcProvider = provider || (existing && existing.provider) || null;
       const srcCodexOriginator = codexOriginator || (existing && existing.codexOriginator) || null;
       const srcCodexSource = codexSource || (existing && existing.codexSource) || null;
+      const srcCodexProfile = normalizeLocalCodexProfileFields({
+        agentId: srcAgentId,
+        profileId: (existing && existing.profileId) || profileId,
+        host: srcHost,
+        wslDistro: srcWslDistro,
+        codexProfileId,
+        codexProfileLabel,
+      }, existing);
       const srcGhosttyTerminalId = normalizeGhosttyTerminalId(ghosttyTerminalId) || (existing && existing.ghosttyTerminalId) || null;
       const {
         title: srcSessionTitle,
@@ -2652,7 +2951,9 @@ function updateSession(sessionId, state, event, opts = {}) {
         provider: srcProvider,
         codexOriginator: srcCodexOriginator,
         codexSource: srcCodexSource,
+        ...srcCodexProfile,
         codexClientEphemeral: mergeCodexClientEphemeral(existing, opts),
+        codebuddyClient: (existing && typeof existing.codebuddyClient === "string" ? existing.codebuddyClient : null),
         ghosttyTerminalId: srcGhosttyTerminalId,
         sessionTitle: srcSessionTitle,
         sessionTitleFromPrompt: srcSessionTitleFromPrompt,
@@ -2765,12 +3066,24 @@ function updateSession(sessionId, state, event, opts = {}) {
   const srcProvider = provider || (existing && existing.provider) || null;
   const srcCodexOriginator = codexOriginator || (existing && existing.codexOriginator) || null;
   const srcCodexSource = codexSource || (existing && existing.codexSource) || null;
+  const srcCodexProfile = normalizeLocalCodexProfileFields({
+    agentId: srcAgentId,
+    profileId: (existing && existing.profileId) || profileId,
+    host: srcHost,
+    wslDistro: srcWslDistro,
+    codexProfileId,
+    codexProfileLabel,
+  }, existing);
   // Deliberately NOT sticky like codexOriginator: each lifecycle event states
   // its own carrier, so a missing value clears it. A DSH session can be
   // reopened in the other carrier (or a stale field can appear without one),
   // and an app-focus target must never survive on a comparison the last event
   // no longer supports.
   const srcDshCarrier = dshCarrier || null;
+  // Sticky across an IDE CodeBuddy session: only UserPromptSubmit is guaranteed
+  // to carry the client field, and later tool/Stop events must keep the carrier.
+  const srcCodebuddyClient = (typeof codebuddyClient === "string" && codebuddyClient.trim())
+    || (existing && typeof existing.codebuddyClient === "string" ? existing.codebuddyClient : null);
   const srcGhosttyTerminalId = normalizeGhosttyTerminalId(ghosttyTerminalId) || (existing && existing.ghosttyTerminalId) || null;
   // Sticky: empty input does not clear an existing title. A session that has
   // ever been named keeps that name until the user explicitly renames it.
@@ -2838,7 +3151,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   const isSubagentStart = event === "SubagentStart" || event === "subagentStart";
   const isSubagentStop = event === "SubagentStop" || event === "subagentStop";
   const normalizedSubagentId = normalizeChildId(subagentId);
-  const isSubagentScopedSessionEnd = event === "SessionEnd" && !!normalizedSubagentId;
+  const isSubagentScopedSessionEnd = SESSION_END_EVENTS.has(event) && !!normalizedSubagentId;
   const isSyntheticSubagentStart = !!(
     isSubagentStart
     && (
@@ -3003,6 +3316,7 @@ function updateSession(sessionId, state, event, opts = {}) {
       rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId,
       agentId: srcAgentId,
       profileId: (existing && existing.profileId) || profileId || "local",
+      codexProfileId: srcCodexProfile.codexProfileId || null,
       host: srcHost,
       wslDistro: srcWslDistro,
       event,
@@ -3094,7 +3408,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     // Native + synthetic double delivery observes the same population. Any
     // child close is also the bounded legacy lane's first-stop release.
     subagentTracker.legacyFloor = false;
-  } else if (normalizedSubagentId && event !== "SessionEnd") {
+  } else if (normalizedSubagentId && !SESSION_END_EVENTS.has(event)) {
     // SubagentStop can be vetoed by another hook. Any later activity from the
     // same child is positive liveness evidence and self-corrects the removal.
     subagentTracker.confirmedIds.add(normalizedSubagentId);
@@ -3130,13 +3444,18 @@ function updateSession(sessionId, state, event, opts = {}) {
     opencodeAttachUrl === undefined && existing && existing.opencodeAttachSource === attachSource
       ? existing.opencodeAttachUrl : opencodeAttachUrl
   ) : null;
-  const base = { opencodeAttachUrl: attachUrl, opencodeAttachSource: attachSource, sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, herdrPaneId: srcHerdr.herdrPaneId, herdrSocket: srcHerdr.herdrSocket, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, claudeConfigDir: srcClaudeConfigDir, claudeEntrypoint: srcClaudeEntrypoint, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, codexClientEphemeral: mergeCodexClientEphemeral(existing, opts), dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, planProgress: srcPlanProgress, planProgressSource: srcPlanProgressSource, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
-  // Desktop apps can reopen a previous conversation on launch, so SessionStart
-  // only means "opened" — not "used". Any other lifecycle event is a real action
-  // and clears the marker. Only the listed agents carry the field; others are
+  const base = { opencodeAttachUrl: attachUrl, opencodeAttachSource: attachSource, sourcePid: srcPid, wtHwnd: srcWtHwnd, cwd: srcCwd, editor: srcEditor, pidChain: srcPidChain, tmuxSocket: srcTmuxSocket, tmuxClient: srcTmuxClient, orcaPaneKey: srcOrcaPaneKey, herdrPaneId: srcHerdr.herdrPaneId, herdrSocket: srcHerdr.herdrSocket, agentPid: srcAgentPid, agentId: srcAgentId, profileId: (existing && existing.profileId) || profileId || "local", rawSessionId: (existing && existing.rawSessionId) || rawSessionId || sessionId, sessionAutomationIdentity: srcSessionAutomationIdentity, host: srcHost, wslDistro: srcWslDistro, claudeConfigDir: srcClaudeConfigDir, claudeEntrypoint: srcClaudeEntrypoint, headless: srcHeadless, platform: srcPlatform, model: srcModel, provider: srcProvider, codexOriginator: srcCodexOriginator, codexSource: srcCodexSource, ...srcCodexProfile, codexClientEphemeral: mergeCodexClientEphemeral(existing, opts), codebuddyClient: srcCodebuddyClient, dshCarrier: srcDshCarrier, ghosttyTerminalId: srcGhosttyTerminalId, sessionTitle: srcSessionTitle, sessionTitleFromPrompt: srcSessionTitleFromPrompt, contextUsage: srcContextUsage, contextUsageOrigin: srcContextUsageOrigin, planProgress: srcPlanProgress, planProgressSource: srcPlanProgressSource, metadataUpdatedAt: srcMetadataUpdatedAt, assistantLastOutput: srcAssistantLastOutput, assistantLastOutputTruncated: srcAssistantLastOutputTruncated, lastToolName: srcToolName, transcriptPath: srcTranscriptPath, recentEvents, pidReachable, lastToolBoundaryAt: srcLastToolBoundaryAt, lastStopAt: srcLastStopAt, awaitingInputSinceStop: resolveAwaitingInputSinceStop(existing, event), muteNotificationSound: state === "notification" && muteNotificationSound === true, claudeBackgroundSubagentHoldAt };
+  // Desktop apps can reopen a previous conversation on launch, so a start event
+  // (see SESSION_START_EVENTS — "SessionStart", Copilot's raw "sessionStart",
+  // Kiro's "agentSpawn") only means "opened" — not "used". A repeated start does
+  // not mark the row while the same agent still has a live approval for it, since
+  // the user is looking at a decision, not an untouched conversation. Any other
+  // event clears the marker; a main-session end deletes the row before this value
+  // would be written back. Only the listed agents carry the field; others are
   // untouched.
   if (AWAITING_ACTIVITY_AGENTS.has(srcAgentId)) {
-    base.awaitingActivity = event === "SessionStart";
+    base.awaitingActivity = SESSION_START_EVENTS.has(event)
+      && !hasLivePendingPermissionForSession(sessionId, srcAgentId);
   }
   if (preserveCompletionAck) base.requiresCompletionAck = true;
   // #862: every branch below rebuilds the session object from `base`; carry the
@@ -3149,8 +3468,10 @@ function updateSession(sessionId, state, event, opts = {}) {
     else if (typedSubagentHoldActive) preservedState = "working";
   }
 
-  // Evict oldest session if at capacity and this is a new session.
-  evictOldestSessionIfNeeded(sessionId);
+  // Evict the oldest session if at capacity and this is a new session. End
+  // events never create a row, so they must not free a slot by evicting a live
+  // session for an id that is already gone.
+  if (!SESSION_END_EVENTS.has(event)) evictOldestSessionIfNeeded(sessionId);
 
   if (isSubagentStop || isSubagentScopedSessionEnd) {
     updateCodexExitProbe(sessionId, srcAgentId, event);
@@ -3224,14 +3545,15 @@ function updateSession(sessionId, state, event, opts = {}) {
     ? pickDisplayHint("working", existing, displayHint)
     : null;
 
-  if (event === "SessionEnd") {
+  if (SESSION_END_EVENTS.has(event)) {
     const endingSession = sessions.get(sessionId);
     const deferredCueSessions = [];
     if (srcAgentId === "codex" && srcHeadless) {
       // Only children present before this SessionEnd can settle a deferred cue;
       // an unrelated child must not settle a parent whose evidence expired.
       const activeParents = [...deferredCodexCompletionCues].filter(id => codexSubagentPresentation.has(id));
-      codexSubagentPresentation.endChild(rawSessionId || endingSession?.rawSessionId || sessionId);
+      codexSubagentPresentation.endChild(rawSessionId || endingSession?.rawSessionId || sessionId,
+        srcCodexProfile.codexProfileId);
       for (const id of activeParents) {
         if (codexSubagentPresentation.has(id)) continue;
         deferredCodexCompletionCues.delete(id);
@@ -3492,7 +3814,7 @@ function updateSession(sessionId, state, event, opts = {}) {
   if (ONESHOT_STATES.has(state)) {
     // Recoverable errors and compaction do not prove a terminal wait ended.
     if (isTerminalWaitSession(sessions.get(sessionId)) && state !== "notification"
-      && event !== "agentStop" && event !== "sessionEnd" && getPendingAttentionIds().has(sessionId)) {
+      && event !== "agentStop" && getPendingAttentionIds().has(sessionId)) {
       const displayState = resolveDisplayState();
       setState(displayState, getSvgOverride(displayState));
       return;
@@ -3679,6 +4001,8 @@ function cleanStaleSessions() {
   let snapshotRefreshNeeded = accountQuota.prune();
   codexSubagentPresentation.prune();
   if (codexSubagentPresentation.consumeExpirationChange()) changed = true;
+  qoderSubagentPresentation.prune();
+  const qoderActivityExpired = qoderSubagentPresentation.consumeExpirationChange();
   for (const id of deferredCodexCompletionCues) {
     if (!codexSubagentPresentation.has(id)) deferredCodexCompletionCues.delete(id);
   }
@@ -3710,6 +4034,10 @@ function cleanStaleSessions() {
     if (decision.snapshotRefreshNeeded) snapshotRefreshNeeded = true;
 
     if (decision.action === "delete") {
+      // Child activity can vouch for an aging card when no PID can establish
+      // that the parent exited. Keep the parent's own state and timestamp.
+      if (s.agentId === "qoder" && (decision.reason === "unreachable" || decision.reason === "no-source")
+        && qoderSubagentPresentation.has(id)) continue;
       const badgeSuffix = decision.reason === "detached-ended" ? ` badge=${decision.badge}` : "";
       debugSession(`stale-delete ${decision.reason} ${describeSession(id, s)}${badgeSuffix}`);
       if (s && s.agentId === "codex") cancelCodexExitProbe(id, `stale-delete-${decision.reason}`);
@@ -3747,7 +4075,8 @@ function cleanStaleSessions() {
     const resolved = resolveDisplayState();
     setState(resolved, getSvgOverride(resolved));
   }
-  if (changed || snapshotRefreshNeeded) emitSessionSnapshot();
+  if (!changed && qoderActivityExpired) refreshSubagentPresentation();
+  else if (changed || snapshotRefreshNeeded) emitSessionSnapshot();
 
   if (startupRecoveryActive && sessions.size === 0) {
     detectRunningAgentProcesses((found) => {
@@ -3777,6 +4106,7 @@ function disposeKimiSessionState(id, reason) {
 function dismissSession(sessionId) {
   const id = typeof sessionId === "string" ? sessionId : "";
   if (!id) return false;
+  codexProcessExitRecovery.delete(id);
   const session = sessions.get(id);
   if (!session) return false;
   if (session.agentId === "codex") cancelCodexExitProbe(id, "session-hidden");
@@ -3861,6 +4191,7 @@ function clearPermissionNotification(sessionId, options = {}) {
 }
 
 function clearSessionsByAgent(agentId) {
+  if (agentId === "codex") codexProcessExitRecovery.clear();
   if (!agentId) return 0;
   if (agentId === "claude-code") claudeToolPhases.clear();
   let removed = 0;
@@ -3903,6 +4234,7 @@ function clearSessionsByAgent(agentId) {
     // pairing to keep the ledger from re-arming a cue for a dead session.
     kimiPermissionGateLedgers.clear();
   }
+  if (agentId === "qoder") qoderSubagentPresentation.clear();
   if (removed > 0) {
     const resolved = resolveDisplayState();
     setState(resolved, getSvgOverride(resolved));
@@ -4174,11 +4506,22 @@ function getPendingAttentionIds() {
   return ids;
 }
 
-// A Claude card is still waiting only while its connection (if any) is open.
-// Turn-ask cards carry res:null and have no connection to watch; they stay
-// live until removed from the pending list.
-function isClaudeInteractionConnectionLive(entry) {
+// A pending permission is still waiting while its connection (if any) is open.
+// Entries without a connection (turn-ask cards, reminders) stay live until the
+// pending list drops them.
+function isPendingPermissionConnectionLive(entry) {
   return !(entry.res && (entry.res.destroyed || entry.res.writableEnded));
+}
+
+// A repeated start must not hide a session that is still waiting for the user to
+// approve a live request from the same agent.
+function hasLivePendingPermissionForSession(sessionId, agentId) {
+  return (ctx.pendingPermissions || []).some((entry) => (
+    entry
+    && entry.sessionId === sessionId
+    && entry.agentId === agentId
+    && isPendingPermissionConnectionLive(entry)
+  ));
 }
 
 // Pending Claude interactions (permission, elicitation, or turn-ask card) for
@@ -4189,7 +4532,7 @@ function hasPendingClaudeInteractionForSession(sessionId) {
     entry
     && entry.agentId === "claude-code"
     && entry.sessionId === sessionId
-    && isClaudeInteractionConnectionLive(entry)
+    && isPendingPermissionConnectionLive(entry)
   ));
 }
 
@@ -4202,7 +4545,7 @@ function getHudPendingAttentionIds() {
     if (!entry || entry.isClaudeTurnAskNotify !== true) continue;
     if (!entry.sessionId || entry.headless || entry.host || entry.wslDistro
       || entry.platform === "wsl" || (entry.profileId && entry.profileId !== "local")
-      || !isClaudeInteractionConnectionLive(entry)) continue;
+      || !isPendingPermissionConnectionLive(entry)) continue;
     ids.add(entry.sessionId);
   }
   return ids;
@@ -4215,7 +4558,7 @@ function hasPendingReminderAttention() {
 }
 
 function projectPendingAttention(ids = getPendingAttentionIds()) {
-  const projected = codexSubagentPresentation.project(ids);
+  const projected = qoderSubagentPresentation.project(codexSubagentPresentation.project(ids));
   const reminders = [...ids].filter(id =>
     isLocalApprovalReminderSession(sessions.get(id)) || isTerminalWaitSession(sessions.get(id)));
   if (!reminders.length) return projected;
@@ -4257,7 +4600,7 @@ function refreshPendingAttention() {
   return emitSessionSnapshot();
 }
 
-function refreshCodexSubagentPresentation() {
+function refreshSubagentPresentation() {
   // Strong one-shot/permission presentation retains its ordinary return timer.
   // This channel only changes the visual projection and never emits lifecycle.
   if (!isSettingsPreviewVisual() && (!ONESHOT_STATES.has(currentState) || currentState === "attention")) {
@@ -4276,6 +4619,12 @@ function playDeferredCodexCompletionCue(session) {
   return true;
 }
 
+function updateQoderSubagentActivity(parentId, input) {
+  const changed = qoderSubagentPresentation.update(parentId, input);
+  if (changed) refreshSubagentPresentation();
+  return changed;
+}
+
 function updateCodexSubagentActivity(parentId, input) {
   if (!codexSubagentPresentation.update(parentId, input)) return false;
   if (input.phase === "stop" && !codexSubagentPresentation.has(parentId)) {
@@ -4285,7 +4634,7 @@ function updateCodexSubagentActivity(parentId, input) {
       return true;
     }
   }
-  refreshCodexSubagentPresentation();
+  refreshSubagentPresentation();
   return true;
 }
 
@@ -4293,7 +4642,7 @@ function clearCodexSubagentActivities() {
   deferredCodexCompletionCues.clear();
   const changed = codexSubagentPresentation.hasAny();
   codexSubagentPresentation.resetActivity();
-  if (changed) refreshCodexSubagentPresentation();
+  if (changed) refreshSubagentPresentation();
   return changed;
 }
 
@@ -4481,9 +4830,11 @@ function getCurrentHitBox() { return currentHitBox; }
 function getStartupRecoveryActive() { return startupRecoveryActive; }
 
 function cleanup() {
+  codexProcessExitRecovery.clear();
   deferredCodexCompletionCues.clear();
   lastPendingAttentionIds.clear();
   codexSubagentPresentation.clear();
+  qoderSubagentPresentation.clear();
   for (const id of codexCompactionHolds.keys()) releaseCodexCompaction(id);
   codexCompactionCompletions.clear();
   codexSessionTurnIds.clear();
@@ -4520,10 +4871,12 @@ return {
   getReminderReselectionOptions,
   updateCodexSubagentActivity,
   clearCodexSubagentActivities,
+  updateQoderSubagentActivity,
+  hasActiveQoderSubagents: qoderSubagentPresentation.hasAny,
   hasActiveCodexSubagents: codexSubagentPresentation.hasAny,
   setState, applyState, updateSession, observeClaudeToolPhase, recordRecapEventOnly, restoreSessionFromLease, resolveDisplayState, resolveVisualBinding, setUpdateVisualState,
   shouldDropForDnd,
-  enableDoNotDisturb, disableDoNotDisturb,
+  enableDoNotDisturb, disableDoNotDisturb, applyDndSleepState,
   // Read-only, unmerged account windows for source-specific alert deduplication.
   getAccountQuotaSnapshot: () => accountQuota.snapshot({ mergeSources: false }),
   startStaleCleanup, stopStaleCleanup, startWakePoll, stopWakePoll,
@@ -4535,6 +4888,12 @@ return {
   formatStdinDiag,
   updateSessionFocusMetadata,
   touchSessionActivity,
+  acceptCodexLiveProcessProgress,
+  canRestoreCodexProcessExit,
+  hasRecoverableCodexProcessExit,
+  listRecoverableCodexRawSessionIds,
+  forgetCodexProcessExit,
+  retainCodexInitializationForRecovery,
   updateSessionMetadata,
   updateCodexInitializationMetadata,
   hasCodexCompactionHold,
@@ -4542,6 +4901,8 @@ return {
   clearClaudeStatuslineAuthority,
   updateAccountQuota,
   clearLocalClaudeQuota,
+  commitLocalDeepseekQuota,
+  clearLocalDeepseekQuota,
   commitLocalKimiQuota,
   clearLocalKimiQuota,
   getQuotaSourceCount,

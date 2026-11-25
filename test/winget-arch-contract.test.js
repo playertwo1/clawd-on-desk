@@ -531,7 +531,7 @@ describe("winget contract installers-regex cross-check", () => {
 describe("winget contract helpers", () => {
   it("reads the Windows build config from package.json", () => {
     const build = readWindowsBuildConfig(pkg);
-    assert.equal(build.owner, "rullerzhou-afk");
+    assert.equal(build.owner, "playertwo1");
     assert.equal(build.repo, "clawd-on-desk");
     assert.ok(build.entries.length >= 1);
   });
@@ -935,7 +935,7 @@ describe("winget publish workflow", () => {
   });
 
   it("declares the exact package identifier live in winget-pkgs", () => {
-    assert.match(WORKFLOW, /komac update rullerzhou-afk\.clawd-on-desk\s*\\?\s*$/m);
+    assert.match(WORKFLOW, /komac update playertwo1\.clawd-on-desk\s*\\?\s*$/m);
   });
 
   it("invokes an npm script that package.json actually defines", () => {

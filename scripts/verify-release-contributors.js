@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const { execFileSync } = require("node:child_process");
 
 const IDENTITY_OVERRIDES = new Map(Object.entries({
+  "fael@live.de": "playertwo1",
   "rullerzhou@gmail.com": null,
   "228746293+rullerzhou-afk@users.noreply.github.com": null,
   "cursoragent@cursor.com": null,
@@ -54,6 +55,9 @@ const IDENTITY_OVERRIDES = new Map(Object.entries({
   "yike001@e.ntu.edu.sg": "Yike-Ye",
   "sunfleeting@gmail.com": "sunfleeting-debug",
   "386476500@qq.com": "du-xinyi",
+  "inferzhang@tencent.com": "XYZliang",
+  "commiyou@gmail.com": "commiyou",
+  "mail@richardkramer.de": "richard-kramer",
 }));
 
 function parseVersion(value) {
